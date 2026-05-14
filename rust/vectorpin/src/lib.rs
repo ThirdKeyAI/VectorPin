@@ -10,10 +10,12 @@
 //! [steganographic exfiltration attacks](https://doi.org/10.5281/zenodo.20058256)
 //! that current vector databases ingest without complaint.
 //!
-//! This crate is the **Rust reference implementation** of protocol version 1.
+//! This crate is the **Rust reference implementation** of protocol version 2.
 //! It is byte-for-byte compatible with the Python reference (`pip install
 //! vectorpin`) and the TypeScript reference (`npm install vectorpin`); a pin
 //! produced by any of the three implementations verifies on the other two.
+//! v2 is a wire-format break with v1; pass through [`verifier::LegacyV1Verifier`]
+//! when migrating historical pins.
 //! Compatibility is enforced by shared test vectors in
 //! [`testvectors/`](https://github.com/ThirdKeyAI/VectorPin/tree/main/testvectors)
 //! consumed by every port's test suite.
@@ -49,6 +51,7 @@
 //!     None,
 //! );
 //! assert!(result.is_ok());
+//! # let _ = stored;
 //! ```
 //!
 //! # What a Pin commits to
@@ -131,7 +134,7 @@ pub mod hash;
 pub mod signer;
 pub mod verifier;
 
-pub use attestation::{Pin, PinHeader, PROTOCOL_VERSION};
+pub use attestation::{AttestationError, Pin, PinHeader, DOMAIN_TAG, PROTOCOL_VERSION};
 pub use hash::{canonical_vector_bytes, hash_text, hash_vector, VecDtype};
 pub use signer::{Signer, SignerError};
-pub use verifier::{Verifier, VerifyError};
+pub use verifier::{KeyEntry, LegacyV1Verifier, VerifyError, VerifyOptions, Verifier};

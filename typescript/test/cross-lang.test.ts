@@ -24,58 +24,74 @@ import {
 } from '../src/attestation.js';
 import { hashText, hashVector, type VecDtype } from '../src/hash.js';
 import { Signer } from '../src/signer.js';
-import { Verifier } from '../src/verifier.js';
+import { Verifier, VerifyErrorCode } from '../src/verifier.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TESTVECTORS_DIR = join(HERE, '..', '..', 'testvectors');
 
-interface FixtureBundle {
+interface V2Bundle {
+  version: number;
+  domain_tag_b64: string;
   public_key_b64: string;
-  private_seed_b64: string;
+  private_key_b64: string;
   key_id: string;
-  fixtures: Fixture[];
+  fixtures: V2Fixture[];
 }
 
-interface Fixture {
+interface V2Fixture {
   name: string;
+  description: string;
   input: {
     source: string;
     model: string;
-    vector_b64: string;
+    vec_b64: string;
     vec_dtype: VecDtype;
     vec_dim: number;
     timestamp: string;
+    model_hash?: string;
+    extra?: Record<string, string>;
   };
-  expected: {
-    pin_json: string;
-    canonical_header_b64: string;
-    vec_hash: string;
-    source_hash: string;
-  };
-}
-
-interface NegativeFixture {
-  name: string;
   pin_json: string;
-  tampered_vector_b64: string;
-  expected_error: string;
+  expected_canonical_bytes_b64: string;
+  expected_vec_hash: string;
+  expected_source_hash: string;
 }
 
-function loadBundle(): FixtureBundle {
-  const raw = readFileSync(join(TESTVECTORS_DIR, 'v1.json'), 'utf8');
-  return JSON.parse(raw) as FixtureBundle;
+interface V2NegativeBundle {
+  version: number;
+  public_key_b64: string;
+  private_key_b64: string;
+  key_id: string;
+  fixtures: V2NegativeFixture[];
 }
 
-function loadNegative(): NegativeFixture {
-  const raw = readFileSync(join(TESTVECTORS_DIR, 'negative_v1.json'), 'utf8');
-  return JSON.parse(raw) as NegativeFixture;
+interface V2NegativeFixture {
+  name: string;
+  description: string;
+  expected_failure: string;
+  pin_json: string;
+  tampered_vec_b64?: string;
+  tampered_source?: string;
+  original_source?: string;
+  vec_dtype?: VecDtype;
+  vec_dim?: number;
+  nan_vec_b64?: string;
+  expected_model?: string;
+  expected_record_id?: string;
+}
+
+function loadV2(): V2Bundle {
+  return JSON.parse(readFileSync(join(TESTVECTORS_DIR, 'v2.json'), 'utf8')) as V2Bundle;
+}
+
+function loadV2Negative(): V2NegativeBundle {
+  return JSON.parse(
+    readFileSync(join(TESTVECTORS_DIR, 'negative_v2.json'), 'utf8'),
+  ) as V2NegativeBundle;
 }
 
 function parseVecF32(bytes: Uint8Array, dim: number): Float32Array {
   assert.equal(bytes.length, dim * 4, 'f32 fixture length sanity check');
-  // The fixture bytes are already little-endian, which is what Float32Array
-  // expects on every realistic Node host (x86_64, arm64). We copy through
-  // a DataView to be explicit and platform-safe.
   const out = new Float32Array(dim);
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   for (let i = 0; i < dim; i++) {
@@ -94,80 +110,180 @@ function parseVecF64(bytes: Uint8Array, dim: number): Float64Array {
   return out;
 }
 
-describe('cross-language positive fixtures (testvectors/v1.json)', () => {
-  const bundle = loadBundle();
+describe('cross-language v2 positive fixtures (testvectors/v2.json)', () => {
+  const bundle = loadV2();
+  assert.equal(bundle.version, 2, 'fixture file declares v2');
   assert.ok(bundle.fixtures.length > 0, 'no fixtures to test');
 
   for (const fx of bundle.fixtures) {
-    it(`fixture: ${fx.name}`, () => {
+    it(`fixture: ${fx.name}`, async () => {
       const dtype = fx.input.vec_dtype;
-      const rawBytes = b64UrlDecodeNoPad(fx.input.vector_b64);
+      const rawBytes = b64UrlDecodeNoPad(fx.input.vec_b64);
       const vector =
         dtype === 'f32'
           ? parseVecF32(rawBytes, fx.input.vec_dim)
           : parseVecF64(rawBytes, fx.input.vec_dim);
 
       // 1. Component hashes line up with what Python recorded.
-      assert.equal(hashText(fx.input.source), fx.expected.source_hash, 'source_hash');
-      assert.equal(hashVector(vector, dtype), fx.expected.vec_hash, 'vec_hash');
+      assert.equal(hashText(fx.input.source), fx.expected_source_hash, 'source_hash');
+      assert.equal(hashVector(vector, dtype), fx.expected_vec_hash, 'vec_hash');
 
       // 2. Reproduce the pin from the deterministic seed and confirm
       //    the canonical bytes + signed JSON match Python's output
-      //    byte-for-byte.
-      const seed = b64UrlDecodeNoPad(bundle.private_seed_b64);
+      //    byte-for-byte (Ed25519 is deterministic).
+      const seed = b64UrlDecodeNoPad(bundle.private_key_b64);
       const signer = Signer.fromPrivateBytes(seed, bundle.key_id);
       const pubExpected = b64UrlDecodeNoPad(bundle.public_key_b64);
       assert.deepEqual(
-        Array.from(signer.publicKeyBytes()),
+        Array.from(await signer.publicKeyBytes()),
         Array.from(pubExpected),
         'public key derivation',
       );
 
-      const pin = signer.pin({
+      const pin = await signer.pin({
         source: fx.input.source,
         model: fx.input.model,
         vector,
         vecDtype: dtype,
         timestamp: fx.input.timestamp,
+        modelHash: fx.input.model_hash,
+        extra: fx.input.extra,
       });
 
       const canonicalActual = canonicalizeHeader(pin.header);
-      const canonicalExpected = b64UrlDecodeNoPad(fx.expected.canonical_header_b64);
+      const canonicalExpected = b64UrlDecodeNoPad(fx.expected_canonical_bytes_b64);
       assert.equal(
         b64UrlEncodeNoPad(canonicalActual),
         b64UrlEncodeNoPad(canonicalExpected),
-        'canonical header bytes',
+        'canonical bytes byte-for-byte',
       );
 
       const producedJson = pinToJSON(pin);
-      assert.equal(producedJson, fx.expected.pin_json, 'pin JSON byte-for-byte');
+      assert.equal(producedJson, fx.pin_json, 'pin JSON byte-for-byte');
 
-      // 3. Round-trip through fromJSON, verify the parsed pin.
+      // 3. Round-trip through pinFromJSON; verify the parsed pin.
       const parsed = pinFromJSON(producedJson);
       const verifier = new Verifier({ [bundle.key_id]: pubExpected });
-      const r1 = verifier.verify(parsed, { source: fx.input.source });
+      const r1 = await verifier.verify(parsed, { source: fx.input.source });
       assert.equal(r1.ok, true, `parsed pin verify: ${r1.error} ${r1.detail}`);
 
       // 4. Verify the JSON Python emitted directly.
-      const pythonPin = pinFromJSON(fx.expected.pin_json);
-      const r2 = verifier.verify(pythonPin, { source: fx.input.source });
+      const pythonPin = pinFromJSON(fx.pin_json);
+      const r2 = await verifier.verify(pythonPin, { source: fx.input.source });
       assert.equal(r2.ok, true, `python pin verify: ${r2.error} ${r2.detail}`);
     });
   }
 });
 
-describe('cross-language negative fixture (testvectors/negative_v1.json)', () => {
-  it('rejects pin against tampered vector with vector_tampered', () => {
-    const neg = loadNegative();
-    assert.equal(neg.expected_error, 'vector_tampered');
+describe('cross-language v2 negative fixtures (testvectors/negative_v2.json)', () => {
+  const bundle = loadV2Negative();
+  const pubKey = b64UrlDecodeNoPad(bundle.public_key_b64);
 
-    const pin = pinFromJSON(neg.pin_json);
-    const tampered = parseVecF32(b64UrlDecodeNoPad(neg.tampered_vector_b64), pin.header.vec_dim);
+  for (const fx of bundle.fixtures) {
+    it(`negative fixture: ${fx.name}`, async () => {
+      const expected = fx.expected_failure.toLowerCase();
 
-    const bundle = loadBundle();
-    const verifier = new Verifier({ [bundle.key_id]: b64UrlDecodeNoPad(bundle.public_key_b64) });
-    const result = verifier.verify(pin, { vector: tampered });
-    assert.equal(result.ok, false);
-    assert.equal(result.error, 'vector_tampered');
+      // Many negative fixtures fail at parse time. We unify parse
+      // failures with verify failures by distinguishing the
+      // "version mismatch" subset (UNSUPPORTED_VERSION) from other
+      // structural failures (PARSE_ERROR). The spec leaves that
+      // boundary up to the implementation.
+      let pin: ReturnType<typeof pinFromJSON> | undefined;
+      let parseErr: string | undefined;
+      try {
+        pin = pinFromJSON(fx.pin_json);
+      } catch (e) {
+        parseErr = e instanceof Error ? e.message : String(e);
+      }
+
+      if (parseErr !== undefined) {
+        const actual = /version/i.test(parseErr)
+          ? VerifyErrorCode.UNSUPPORTED_VERSION
+          : VerifyErrorCode.PARSE_ERROR;
+        assert.equal(
+          actual,
+          expected,
+          `${fx.name}: parser rejected with ${actual} but fixture expected ${expected} (msg: ${parseErr})`,
+        );
+        return;
+      }
+
+      const verifier = new Verifier({ [bundle.key_id]: pubKey });
+
+      // Build verify options from optional fixture fields.
+      const opts: Parameters<Verifier['verify']>[1] = {};
+      if (fx.tampered_source !== undefined) {
+        opts.source = fx.tampered_source;
+      }
+      if (fx.expected_model !== undefined) {
+        opts.expectedModel = fx.expected_model;
+      }
+      if (fx.expected_record_id !== undefined) {
+        opts.expectedRecordId = fx.expected_record_id;
+      }
+      if (fx.tampered_vec_b64 !== undefined && fx.vec_dtype && fx.vec_dim !== undefined) {
+        const bytes = b64UrlDecodeNoPad(fx.tampered_vec_b64);
+        opts.vector =
+          fx.vec_dtype === 'f32' ? parseVecF32(bytes, fx.vec_dim) : parseVecF64(bytes, fx.vec_dim);
+      }
+      if (fx.nan_vec_b64 !== undefined && fx.vec_dtype && fx.vec_dim !== undefined) {
+        const bytes = b64UrlDecodeNoPad(fx.nan_vec_b64);
+        opts.vector =
+          fx.vec_dtype === 'f32' ? parseVecF32(bytes, fx.vec_dim) : parseVecF64(bytes, fx.vec_dim);
+      }
+
+      const result = await verifier.verify(pin!, opts);
+      assert.equal(result.ok, false, `${fx.name}: expected failure but got OK`);
+      assert.equal(
+        result.error,
+        expected,
+        `${fx.name}: expected ${expected} but got ${result.error} (${result.detail})`,
+      );
+    });
+  }
+
+  it('codespace coverage: all expected_failure codes map to a VerifyErrorCode', () => {
+    const codes = new Set(Object.values(VerifyErrorCode));
+    for (const fx of bundle.fixtures) {
+      const expected = fx.expected_failure.toLowerCase();
+      assert.ok(
+        codes.has(expected as VerifyErrorCode),
+        `${fx.name}: expected_failure ${fx.expected_failure} (${expected}) is not a VerifyErrorCode`,
+      );
+    }
   });
+});
+
+describe('strict v2 verifier rejects v1 fixtures', () => {
+  // Strict v2 verifier should refuse every pin in v1.json as
+  // UNSUPPORTED_VERSION (parser may also fail earlier, which is fine).
+  interface V1Bundle {
+    public_key_b64: string;
+    key_id: string;
+    fixtures: { name: string; expected: { pin_json: string } }[];
+  }
+  const v1 = JSON.parse(readFileSync(join(TESTVECTORS_DIR, 'v1.json'), 'utf8')) as V1Bundle;
+  const pubKey = b64UrlDecodeNoPad(v1.public_key_b64);
+  const verifier = new Verifier({ [v1.key_id]: pubKey });
+
+  for (const fx of v1.fixtures) {
+    it(`rejects v1 fixture ${fx.name}`, async () => {
+      // Either the parser refuses the v=1 pin, or the verifier
+      // returns UNSUPPORTED_VERSION. Both are acceptable; we just
+      // assert it is NOT accepted.
+      let parsed: ReturnType<typeof pinFromJSON> | undefined;
+      let threw = false;
+      try {
+        parsed = pinFromJSON(fx.expected.pin_json);
+      } catch {
+        threw = true;
+      }
+      if (threw) {
+        return; // strict parser refused — that's the contract.
+      }
+      const r = await verifier.verify(parsed!);
+      assert.equal(r.ok, false, 'v1 pin must not verify under strict v2');
+      assert.equal(r.error, VerifyErrorCode.UNSUPPORTED_VERSION);
+    });
+  }
 });

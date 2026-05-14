@@ -25,13 +25,28 @@ Quick start:
     assert verifier.verify(pin, source="The quick brown fox.", vector=embedding_vector)
 """
 
-from vectorpin.attestation import Pin, PinHeader
+from vectorpin.attestation import (
+    DOMAIN_TAG,
+    PROTOCOL_VERSION,
+    Pin,
+    PinHeader,
+)
 from vectorpin.hash import canonical_vector_bytes, hash_text, hash_vector
 from vectorpin.signer import Signer
-from vectorpin.verifier import VerificationResult, Verifier, VerifyError
+from vectorpin.verifier import (
+    KeyEntry,
+    LegacyV1Verifier,
+    VerificationResult,
+    Verifier,
+    VerifyError,
+)
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
+    "DOMAIN_TAG",
+    "PROTOCOL_VERSION",
+    "KeyEntry",
+    "LegacyV1Verifier",
     "Pin",
     "PinHeader",
     "Signer",

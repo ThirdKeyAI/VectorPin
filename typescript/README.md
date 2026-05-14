@@ -7,23 +7,22 @@ npm install vectorpin
 ```
 
 ```ts
-import { Signer, Verifier } from 'vectorpin';
+import { Signer, Verifier, pinToJSON } from 'vectorpin';
 
 // At ingestion time
 const signer = Signer.generate('prod-2026-05');
 const embedding = new Float32Array(/* ... 3072 floats from your model ... */);
-const pin = signer.pin({
+const pin = await signer.pin({
   source: 'The quick brown fox.',
   model: 'text-embedding-3-large',
   vector: embedding,
 });
 // Store JSON.stringify-able pin alongside the embedding in your vector DB metadata.
-import { pinToJSON } from 'vectorpin';
 const json = pinToJSON(pin);
 
 // At read/audit time
-const verifier = new Verifier({ [signer.keyId]: signer.publicKeyBytes() });
-const result = verifier.verify(pin, {
+const verifier = new Verifier({ [signer.keyId]: await signer.publicKeyBytes() });
+const result = await verifier.verify(pin, {
   source: 'The quick brown fox.',
   vector: embedding,
 });
@@ -34,7 +33,7 @@ if (!result.ok) {
 
 ## Compatibility
 
-The TypeScript port consumes the same `testvectors/v1.json` and `testvectors/negative_v1.json` fixtures the Python and Rust ports use in CI. A pin produced by any of the three implementations verifies on the other two; canonical bytes and signatures are identical byte-for-byte.
+This is **protocol v2**. The TypeScript port consumes the same `testvectors/v2.json` and `testvectors/negative_v2.json` fixtures the Python and Rust ports use in CI. A pin produced by any of the three implementations verifies on the other two; canonical bytes and signatures are identical byte-for-byte. v1 pins do not verify under the default verifier; use `LegacyV1Verifier` if you need to validate pre-v2 pins during a migration.
 
 ## Runtime support
 
