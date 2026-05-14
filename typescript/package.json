@@ -43,8 +43,8 @@
     "lint": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@noble/ed25519": "^2.1.0",
-    "@noble/hashes": "^1.4.0"
+    "@noble/ed25519": "2.3.0",
+    "@noble/hashes": "1.8.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

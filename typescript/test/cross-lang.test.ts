@@ -99,7 +99,7 @@ describe('cross-language positive fixtures (testvectors/v1.json)', () => {
   assert.ok(bundle.fixtures.length > 0, 'no fixtures to test');
 
   for (const fx of bundle.fixtures) {
-    it(`fixture: ${fx.name}`, () => {
+    it(`fixture: ${fx.name}`, async () => {
       const dtype = fx.input.vec_dtype;
       const rawBytes = b64UrlDecodeNoPad(fx.input.vector_b64);
       const vector =
@@ -118,12 +118,12 @@ describe('cross-language positive fixtures (testvectors/v1.json)', () => {
       const signer = Signer.fromPrivateBytes(seed, bundle.key_id);
       const pubExpected = b64UrlDecodeNoPad(bundle.public_key_b64);
       assert.deepEqual(
-        Array.from(signer.publicKeyBytes()),
+        Array.from(await signer.publicKeyBytes()),
         Array.from(pubExpected),
         'public key derivation',
       );
 
-      const pin = signer.pin({
+      const pin = await signer.pin({
         source: fx.input.source,
         model: fx.input.model,
         vector,
@@ -145,19 +145,19 @@ describe('cross-language positive fixtures (testvectors/v1.json)', () => {
       // 3. Round-trip through fromJSON, verify the parsed pin.
       const parsed = pinFromJSON(producedJson);
       const verifier = new Verifier({ [bundle.key_id]: pubExpected });
-      const r1 = verifier.verify(parsed, { source: fx.input.source });
+      const r1 = await verifier.verify(parsed, { source: fx.input.source });
       assert.equal(r1.ok, true, `parsed pin verify: ${r1.error} ${r1.detail}`);
 
       // 4. Verify the JSON Python emitted directly.
       const pythonPin = pinFromJSON(fx.expected.pin_json);
-      const r2 = verifier.verify(pythonPin, { source: fx.input.source });
+      const r2 = await verifier.verify(pythonPin, { source: fx.input.source });
       assert.equal(r2.ok, true, `python pin verify: ${r2.error} ${r2.detail}`);
     });
   }
 });
 
 describe('cross-language negative fixture (testvectors/negative_v1.json)', () => {
-  it('rejects pin against tampered vector with vector_tampered', () => {
+  it('rejects pin against tampered vector with vector_tampered', async () => {
     const neg = loadNegative();
     assert.equal(neg.expected_error, 'vector_tampered');
 
@@ -166,7 +166,7 @@ describe('cross-language negative fixture (testvectors/negative_v1.json)', () =>
 
     const bundle = loadBundle();
     const verifier = new Verifier({ [bundle.key_id]: b64UrlDecodeNoPad(bundle.public_key_b64) });
-    const result = verifier.verify(pin, { vector: tampered });
+    const result = await verifier.verify(pin, { vector: tampered });
     assert.equal(result.ok, false);
     assert.equal(result.error, 'vector_tampered');
   });

@@ -188,7 +188,9 @@ fn run_fixture(bundle: &FixtureBundle, fx: &Fixture) {
     // Round-trip back through from_json and confirm the verifier accepts.
     let parsed = Pin::from_json(&produced_json).expect("rust parses its own JSON");
     let mut verifier = Verifier::new();
-    verifier.add_key(&bundle.key_id, signer.public_key_bytes());
+    verifier
+        .add_key(&bundle.key_id, signer.public_key_bytes())
+        .expect("fixture pubkey is valid");
     verifier
         .verify_full::<&[f32]>(&parsed, Some(&fx.input.source), None, None)
         .expect("rust verifies own pin");
@@ -231,10 +233,12 @@ fn cross_language_negative_tampered_vector() {
     let raw_pos = std::fs::read_to_string(fixtures_path()).expect("read v1.json");
     let bundle: FixtureBundle = serde_json::from_str(&raw_pos).expect("parse v1.json");
     let mut verifier = Verifier::new();
-    verifier.add_key(
-        &bundle.key_id,
-        b64(&bundle.public_key_b64).try_into().unwrap(),
-    );
+    verifier
+        .add_key(
+            &bundle.key_id,
+            b64(&bundle.public_key_b64).try_into().unwrap(),
+        )
+        .expect("fixture pubkey is valid");
 
     let err = verifier
         .verify_full::<&[f32]>(&pin, None, Some(tampered.as_slice()), None)

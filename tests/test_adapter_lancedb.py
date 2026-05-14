@@ -97,6 +97,45 @@ def test_get_missing_id_raises(lance_table):
         adapter.get("nonexistent-id")
 
 
+def test_constructor_rejects_invalid_id_column(lance_table):
+    """Column names that aren't valid SQL identifiers must be refused."""
+    for bad in ("id; DROP TABLE x", "id'", "1id", "id-x", "id with space", ""):
+        with pytest.raises(ValueError, match="id_column"):
+            LanceDBAdapter(lance_table, id_column=bad)
+
+
+def test_constructor_rejects_invalid_vector_column(lance_table):
+    with pytest.raises(ValueError, match="vector_column"):
+        LanceDBAdapter(lance_table, vector_column="vec; DROP TABLE x")
+
+
+def test_id_predicate_rejects_record_id_with_null_byte(lance_table):
+    """Record ids with control chars or backslashes must be refused."""
+    adapter = LanceDBAdapter(lance_table)
+    with pytest.raises(ValueError, match="forbidden character"):
+        adapter.get("foo\x00bar")
+
+
+def test_id_predicate_rejects_record_id_with_newline(lance_table):
+    adapter = LanceDBAdapter(lance_table)
+    with pytest.raises(ValueError, match="forbidden character"):
+        adapter.get("foo\nbar")
+
+
+def test_id_predicate_rejects_record_id_with_backslash(lance_table):
+    adapter = LanceDBAdapter(lance_table)
+    with pytest.raises(ValueError, match="forbidden character"):
+        adapter.get("foo\\bar")
+
+
+def test_id_predicate_allows_quote_in_record_id(lance_table):
+    """Single quotes are still safely escaped via doubling — not rejected."""
+    adapter = LanceDBAdapter(lance_table)
+    # No such record, but the predicate must build without raising.
+    with pytest.raises(KeyError):
+        adapter.get("o'brien")
+
+
 def test_tampered_vector_caught_after_pin(lance_table):
     """Sanity check: pinning a vector then mutating the array invalidates verify."""
     adapter = LanceDBAdapter(lance_table)

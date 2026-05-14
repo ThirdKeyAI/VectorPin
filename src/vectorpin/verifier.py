@@ -106,6 +106,19 @@ class Verifier:
                 f"pin version {pin.header.v} not supported by this verifier",
             )
 
+        # Pre-check signature shape before any cryptographic work so a
+        # malformed pin produces a structured SIGNATURE_INVALID rather
+        # than letting a downstream exception escape.
+        if not isinstance(pin.sig, (bytes, bytearray)) or len(pin.sig) != 64:
+            if isinstance(pin.sig, (bytes, bytearray)):
+                detail = f"signature must be exactly 64 bytes; got {len(pin.sig)}"
+            else:
+                detail = (
+                    f"signature must be exactly 64 bytes; "
+                    f"got {type(pin.sig).__name__}"
+                )
+            return VerificationResult(False, VerifyError.SIGNATURE_INVALID, detail)
+
         public_key = self._keys.get(pin.kid)
         if public_key is None:
             return VerificationResult(

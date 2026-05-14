@@ -13,7 +13,7 @@
 //! ```
 //! use vectorpin::Signer;
 //!
-//! let signer = Signer::generate("prod-2026-05".to_string());
+//! let signer = Signer::generate("prod-2026-05".to_string()).unwrap();
 //! let v: Vec<f32> = vec![0.1, 0.2, 0.3];
 //! let pin = signer.pin("hello", "text-embedding-3-large", v.as_slice()).unwrap();
 //! assert_eq!(pin.kid, "prod-2026-05");
@@ -27,7 +27,7 @@
 //! use vectorpin::signer::{PinOptions, Signer};
 //! use vectorpin::VecDtype;
 //!
-//! let signer = Signer::generate("test".to_string());
+//! let signer = Signer::generate("test".to_string()).unwrap();
 //! let v: Vec<f32> = vec![0.1, 0.2, 0.3];
 //! let opts = PinOptions {
 //!     dtype: Some(VecDtype::F32),
@@ -43,6 +43,7 @@
 use std::collections::BTreeMap;
 
 use ed25519_dalek::{Signer as _, SigningKey, VerifyingKey};
+use zeroize::Zeroizing;
 
 use crate::attestation::{Pin, PinHeader, PROTOCOL_VERSION};
 use crate::hash::{hash_text, hash_vector, VecDtype, VectorRef};
@@ -85,18 +86,18 @@ pub struct Signer {
 
 impl Signer {
     /// Generate a fresh Ed25519 signer. Tests and demos only.
-    pub fn generate(key_id: String) -> Self {
+    ///
+    /// Returns [`SignerError::EmptyKeyId`] if `key_id` is empty so the
+    /// constructor matches the contract of [`Signer::from_private_bytes`].
+    pub fn generate(key_id: String) -> Result<Self, SignerError> {
         if key_id.is_empty() {
-            // Match the contract documented for `from_private_bytes`.
-            // Generation in tests is the only path here so this panic is
-            // acceptable; from_private_bytes returns Result.
-            panic!("key_id must be non-empty");
+            return Err(SignerError::EmptyKeyId);
         }
         let mut rng = rand::rngs::OsRng;
-        Signer {
+        Ok(Signer {
             signing_key: SigningKey::generate(&mut rng),
             key_id,
-        }
+        })
     }
 
     /// Load a signer from a 32-byte raw Ed25519 private seed.
@@ -123,9 +124,11 @@ impl Signer {
         VerifyingKey::from(&self.signing_key).to_bytes()
     }
 
-    /// 32-byte raw Ed25519 private seed. Treat as a secret.
-    pub fn private_key_bytes(&self) -> [u8; 32] {
-        self.signing_key.to_bytes()
+    /// 32-byte raw Ed25519 private seed, wrapped in [`Zeroizing`] so the
+    /// buffer is wiped from memory on drop. Treat the contents as
+    /// secret; deref the returned value to access the raw `[u8; 32]`.
+    pub fn private_key_bytes(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.signing_key.to_bytes())
     }
 
     /// Create a [`Pin`] for `(source, model, vector)`.
@@ -159,6 +162,9 @@ impl Signer {
         let dtype = opts.dtype.unwrap_or_else(|| vector.native_dtype());
         let ts = opts.timestamp.unwrap_or_else(now_utc_iso8601);
 
+        let vec_dim = u32::try_from(vector.len())
+            .map_err(|_| SignerError::InvalidVector("vec_dim exceeds u32"))?;
+
         let header = PinHeader {
             v: PROTOCOL_VERSION,
             model: model.to_owned(),
@@ -166,7 +172,7 @@ impl Signer {
             source_hash: hash_text(source),
             vec_hash: hash_vector(vector, dtype),
             vec_dtype: dtype.as_str().to_owned(),
-            vec_dim: vector.len() as u32,
+            vec_dim,
             ts,
             extra: opts.extra,
         };
@@ -198,37 +204,15 @@ pub struct PinOptions {
 }
 
 fn now_utc_iso8601() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    // We avoid pulling in `chrono` for one timestamp; this gives the
-    // same `YYYY-MM-DDTHH:MM:SSZ` format the Python reference emits.
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let (y, mo, d, h, mi, se) = unix_to_ymdhms(secs as i64);
-    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{se:02}Z")
-}
-
-fn unix_to_ymdhms(t: i64) -> (i32, u32, u32, u32, u32, u32) {
-    // Days since 1970-01-01.
-    let days = (t.div_euclid(86400)) as i32;
-    let secs_of_day = t.rem_euclid(86400) as u32;
-    let h = secs_of_day / 3600;
-    let mi = (secs_of_day % 3600) / 60;
-    let se = secs_of_day % 60;
-
-    // Civil from days, see http://howardhinnant.github.io/date_algorithms.html
-    let z = days + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u32;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i32 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d, h, mi, se)
+    // Produce a second-resolution UTC timestamp in `YYYY-MM-DDTHH:MM:SSZ`
+    // form, matching the existing wire-format contract. The v1.1 branch
+    // is responsible for any tightening of this format.
+    let now = time::OffsetDateTime::now_utc();
+    let fmt = time::macros::format_description!(
+        "[year]-[month]-[day]T[hour]:[minute]:[second]Z"
+    );
+    now.format(&fmt)
+        .expect("UTC OffsetDateTime always formats with a fixed description")
 }
 
 #[cfg(test)]
@@ -237,13 +221,19 @@ mod tests {
 
     #[test]
     fn pin_round_trip_basic() {
-        let signer = Signer::generate("test".into());
+        let signer = Signer::generate("test".into()).unwrap();
         let v: Vec<f32> = vec![1.0, 2.0, 3.0];
         let pin = signer.pin("hello", "model", v.as_slice()).unwrap();
         assert_eq!(pin.kid, "test");
         assert_eq!(pin.header.vec_dim, 3);
         assert_eq!(pin.header.vec_dtype, "f32");
         assert_eq!(pin.sig.len(), 64);
+    }
+
+    #[test]
+    fn generate_rejects_empty_kid() {
+        let res = Signer::generate("".into());
+        assert!(matches!(res, Err(SignerError::EmptyKeyId)));
     }
 
     #[test]
@@ -260,9 +250,9 @@ mod tests {
 
     #[test]
     fn private_seed_round_trip() {
-        let signer = Signer::generate("k".into());
+        let signer = Signer::generate("k".into()).unwrap();
         let seed = signer.private_key_bytes();
-        let restored = Signer::from_private_bytes(&seed, "k".into()).unwrap();
+        let restored = Signer::from_private_bytes(seed.as_ref(), "k".into()).unwrap();
         assert_eq!(signer.public_key_bytes(), restored.public_key_bytes());
     }
 }

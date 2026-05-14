@@ -79,3 +79,125 @@ def test_pin_json_is_compact():
     # No whitespace, sorted keys
     assert ": " not in j
     assert ", " not in j
+
+
+# ---- strict validation in from_dict / from_json ----
+
+
+def _valid_pin_dict(**overrides):
+    """A baseline dict that passes from_dict, plus an override hook."""
+    import base64
+
+    d = {
+        "v": PROTOCOL_VERSION,
+        "model": "m",
+        "source_hash": "sha256:" + "0" * 64,
+        "vec_hash": "sha256:" + "1" * 64,
+        "vec_dtype": "f32",
+        "vec_dim": 16,
+        "ts": "2026-05-13T00:00:00Z",
+        "kid": "k",
+        "sig": base64.urlsafe_b64encode(b"\x01" * 64).rstrip(b"=").decode("ascii"),
+    }
+    d.update(overrides)
+    return d
+
+
+def test_from_json_rejects_oversized_payload():
+    # MAX_PIN_JSON_BYTES is 64 KiB; anything bigger must be refused
+    # before json.loads runs.
+    huge = '{"v":1,"junk":"' + ("a" * 70_000) + '"}'
+    with pytest.raises(ValueError, match="too large"):
+        Pin.from_json(huge)
+
+
+def test_from_dict_rejects_wrong_version():
+    with pytest.raises(ValueError, match="version"):
+        Pin.from_dict(_valid_pin_dict(v=2))
+
+
+def test_from_dict_rejects_bad_vec_dtype():
+    with pytest.raises(ValueError, match="vec_dtype"):
+        Pin.from_dict(_valid_pin_dict(vec_dtype="f16"))
+
+
+def test_from_dict_rejects_negative_vec_dim():
+    with pytest.raises(ValueError, match="vec_dim"):
+        Pin.from_dict(_valid_pin_dict(vec_dim=-1))
+
+
+def test_from_dict_rejects_zero_vec_dim():
+    with pytest.raises(ValueError, match="vec_dim"):
+        Pin.from_dict(_valid_pin_dict(vec_dim=0))
+
+
+def test_from_dict_rejects_huge_vec_dim():
+    with pytest.raises(ValueError, match="vec_dim"):
+        Pin.from_dict(_valid_pin_dict(vec_dim=10_000_000))
+
+
+def test_from_dict_rejects_non_int_vec_dim():
+    with pytest.raises(ValueError, match="vec_dim"):
+        Pin.from_dict(_valid_pin_dict(vec_dim="3072"))
+
+
+def test_from_dict_rejects_bool_vec_dim():
+    # bool is technically a subclass of int — we explicitly reject it.
+    with pytest.raises(ValueError, match="vec_dim"):
+        Pin.from_dict(_valid_pin_dict(vec_dim=True))
+
+
+def test_from_dict_rejects_malformed_source_hash():
+    with pytest.raises(ValueError, match="source_hash"):
+        Pin.from_dict(_valid_pin_dict(source_hash="md5:beef"))
+
+
+def test_from_dict_rejects_malformed_vec_hash():
+    with pytest.raises(ValueError, match="vec_hash"):
+        Pin.from_dict(_valid_pin_dict(vec_hash="sha256:short"))
+
+
+def test_from_dict_rejects_uppercase_hash_hex():
+    # Lowercase hex only — matches what hash.py produces.
+    with pytest.raises(ValueError, match="source_hash"):
+        Pin.from_dict(_valid_pin_dict(source_hash="sha256:" + "A" * 64))
+
+
+def test_from_dict_rejects_wrong_sig_length():
+    import base64
+
+    short_sig = base64.urlsafe_b64encode(b"\x01" * 32).rstrip(b"=").decode("ascii")
+    with pytest.raises(ValueError, match="sig"):
+        Pin.from_dict(_valid_pin_dict(sig=short_sig))
+
+
+def test_from_dict_rejects_non_base64_sig():
+    with pytest.raises(ValueError, match="sig"):
+        Pin.from_dict(_valid_pin_dict(sig="!!!not_base64!!!"))
+
+
+def test_from_dict_rejects_empty_model():
+    with pytest.raises(ValueError, match="model"):
+        Pin.from_dict(_valid_pin_dict(model=""))
+
+
+def test_from_dict_rejects_empty_kid():
+    with pytest.raises(ValueError, match="kid"):
+        Pin.from_dict(_valid_pin_dict(kid=""))
+
+
+def test_from_dict_rejects_non_string_extra_value():
+    with pytest.raises(ValueError, match="extra values"):
+        Pin.from_dict(_valid_pin_dict(extra={"region": 5}))
+
+
+def test_from_dict_rejects_non_string_extra_key():
+    with pytest.raises(ValueError, match="extra keys"):
+        Pin.from_dict(_valid_pin_dict(extra={5: "x"}))
+
+
+def test_from_dict_accepts_valid_pin():
+    # Sanity check that the baseline isn't accidentally rejected.
+    pin = Pin.from_dict(_valid_pin_dict())
+    assert pin.header.vec_dim == 16
+    assert pin.kid == "k"

@@ -8,7 +8,6 @@
 // and demos; load production keys from a managed secret store.
 
 import * as ed25519 from '@noble/ed25519';
-import { sha512 } from '@noble/hashes/sha2';
 import { randomBytes } from '@noble/hashes/utils';
 
 import {
@@ -19,9 +18,13 @@ import {
 } from './attestation.js';
 import { hashText, hashVector, type VecDtype, type VectorInput } from './hash.js';
 
-// noble/ed25519 v2 sync API requires a sha512 hookup. Hooking it up
-// at module load is fine; it's a pure-JS function reference.
-ed25519.etc.sha512Sync = (...m) => sha512(ed25519.etc.concatBytes(...m));
+// Hard requirement: a Web-Crypto-compatible CSPRNG must be available
+// at module load. Every supported runtime (Node >=20, Deno, Bun,
+// modern browsers, Cloudflare Workers) provides this. If it's missing
+// we refuse to load rather than silently fall back to a weaker source.
+if (typeof crypto === 'undefined' || typeof crypto.getRandomValues !== 'function') {
+  throw new Error('CSPRNG not available; VectorPin requires a runtime with Web Crypto API');
+}
 
 export interface SignerPinOptions {
   /** Source text the embedding was produced from. */
@@ -48,15 +51,18 @@ export interface SignerPinOptions {
  * to the right key during rotation.
  */
 export class Signer {
-  readonly #privateKey: Uint8Array;
+  #privateKey: Uint8Array;
   readonly #keyId: string;
+  #wiped = false;
 
   private constructor(privateKey: Uint8Array, keyId: string) {
     if (!keyId) throw new Error('keyId must be non-empty');
     if (privateKey.length !== 32) {
       throw new Error(`private key must be 32 bytes, got ${privateKey.length}`);
     }
-    this.#privateKey = privateKey;
+    // Defensive copy so the caller cannot mutate or zero our key
+    // after construction.
+    this.#privateKey = new Uint8Array(privateKey);
     this.#keyId = keyId;
   }
 
@@ -74,19 +80,36 @@ export class Signer {
     return this.#keyId;
   }
 
+  /** True after `wipe()` has been called; the signer is unusable. */
+  get isWiped(): boolean {
+    return this.#wiped;
+  }
+
+  /**
+   * Zero out the private key material and mark the signer unusable.
+   * Subsequent calls to `pin()` or key accessors will throw.
+   */
+  wipe(): void {
+    this.#privateKey.fill(0);
+    this.#wiped = true;
+  }
+
   /** 32-byte raw Ed25519 public key — what verifiers register. */
-  publicKeyBytes(): Uint8Array {
-    return ed25519.getPublicKey(this.#privateKey);
+  async publicKeyBytes(): Promise<Uint8Array> {
+    this.#assertUsable();
+    return ed25519.getPublicKeyAsync(this.#privateKey);
   }
 
   /** 32-byte raw Ed25519 private seed. Treat as a secret. */
   privateKeyBytes(): Uint8Array {
+    this.#assertUsable();
     // Defensive copy so the caller cannot mutate our internal state.
     return new Uint8Array(this.#privateKey);
   }
 
   /** Create a signed Pin for a (source, model, vector) triple. */
-  pin(opts: SignerPinOptions): Pin {
+  async pin(opts: SignerPinOptions): Promise<Pin> {
+    this.#assertUsable();
     if (opts.vector.length === 0) {
       throw new Error('cannot pin an empty vector');
     }
@@ -104,8 +127,14 @@ export class Signer {
       extra: opts.extra,
     };
     const canonical = canonicalizeHeader(header);
-    const sig = ed25519.sign(canonical, this.#privateKey);
+    const sig = await ed25519.signAsync(canonical, this.#privateKey);
     return { header, kid: this.#keyId, sig };
+  }
+
+  #assertUsable(): void {
+    if (this.#wiped) {
+      throw new Error('signer has been wiped and is no longer usable');
+    }
   }
 }
 

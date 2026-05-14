@@ -132,3 +132,27 @@ def test_pin_json_round_trip_with_verification(
     json_str = pin.to_json()
     restored = Pin.from_json(json_str)
     assert verifier.verify(restored, source="hello", vector=vector)
+
+
+def test_verify_rejects_wrong_length_sig(signer: Signer, verifier: Verifier, vector: np.ndarray):
+    """A Pin assembled by hand with a too-short sig must fail signature_invalid.
+
+    We bypass Pin.from_dict (which would catch this earlier) by
+    constructing the dataclass directly, mirroring what would happen if
+    a caller pulled the dataclass straight out of a partially-validated
+    pipeline.
+    """
+    pin = signer.pin(source="x", model="m", vector=vector)
+    bad = Pin(header=pin.header, kid=pin.kid, sig=b"\x00" * 32)
+    result = verifier.verify(bad)
+    assert not result.ok
+    assert result.error is VerifyError.SIGNATURE_INVALID
+    assert "64 bytes" in result.detail
+
+
+def test_verify_rejects_non_bytes_sig(signer: Signer, verifier: Verifier, vector: np.ndarray):
+    pin = signer.pin(source="x", model="m", vector=vector)
+    bad = Pin(header=pin.header, kid=pin.kid, sig="not bytes")  # type: ignore[arg-type]
+    result = verifier.verify(bad)
+    assert not result.ok
+    assert result.error is VerifyError.SIGNATURE_INVALID

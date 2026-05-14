@@ -23,7 +23,7 @@
 //! ```
 //! use vectorpin::{Pin, Signer};
 //!
-//! let signer = Signer::generate("demo".to_string());
+//! let signer = Signer::generate("demo".to_string()).unwrap();
 //! let v: Vec<f32> = vec![1.0, 2.0, 3.0];
 //! let pin = signer.pin("hello", "test-model", v.as_slice()).unwrap();
 //!
@@ -144,12 +144,12 @@ impl PinHeader {
 /// ```
 /// use vectorpin::{Pin, Signer, Verifier};
 ///
-/// let signer = Signer::generate("k1".to_string());
+/// let signer = Signer::generate("k1".to_string()).unwrap();
 /// let v: Vec<f32> = vec![1.0, 2.0, 3.0];
 /// let pin = signer.pin("hello", "m", v.as_slice()).unwrap();
 ///
 /// let mut verifier = Verifier::new();
-/// verifier.add_key(signer.key_id(), signer.public_key_bytes());
+/// verifier.add_key(signer.key_id(), signer.public_key_bytes()).unwrap();
 /// assert!(verifier.verify_signature(&Pin::from_json(&pin.to_json()).unwrap()).is_ok());
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,6 +194,12 @@ pub enum AttestationError {
     /// A required field was missing from the pin JSON.
     #[error("missing required field: {0}")]
     MissingField(&'static str),
+    /// The `extra` map contained a value that was not a JSON string.
+    /// The wire format only permits string values; non-string values
+    /// used to be silently dropped and are now rejected so callers see
+    /// the malformed input.
+    #[error("extra map value for key {0:?} is not a string")]
+    ExtraTypeMismatch(String),
 }
 
 impl Pin {
@@ -280,6 +286,26 @@ impl Pin {
                 .ok_or(AttestationError::MissingField(name))
         }
 
+        let extra: BTreeMap<String, String> = match obj.get("extra") {
+            None => BTreeMap::new(),
+            Some(serde_json::Value::Object(m)) => {
+                let mut out = BTreeMap::new();
+                for (k, v) in m {
+                    match v.as_str() {
+                        Some(s) => {
+                            out.insert(k.clone(), s.to_owned());
+                        }
+                        None => {
+                            return Err(AttestationError::ExtraTypeMismatch(k.clone()));
+                        }
+                    }
+                }
+                out
+            }
+            // Anything other than absent-or-object for `extra` is malformed.
+            Some(_) => return Err(AttestationError::MissingField("extra")),
+        };
+
         let header = PinHeader {
             v,
             model: s_field(obj, "model")?,
@@ -290,20 +316,14 @@ impl Pin {
             source_hash: s_field(obj, "source_hash")?,
             vec_hash: s_field(obj, "vec_hash")?,
             vec_dtype: s_field(obj, "vec_dtype")?,
-            vec_dim: obj
-                .get("vec_dim")
-                .and_then(|x| x.as_u64())
-                .ok_or(AttestationError::MissingField("vec_dim"))? as u32,
+            vec_dim: u32::try_from(
+                obj.get("vec_dim")
+                    .and_then(|x| x.as_u64())
+                    .ok_or(AttestationError::MissingField("vec_dim"))?,
+            )
+            .map_err(|_| AttestationError::MissingField("vec_dim"))?,
             ts: s_field(obj, "ts")?,
-            extra: obj
-                .get("extra")
-                .and_then(|x| x.as_object())
-                .map(|m| {
-                    m.iter()
-                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
-                        .collect()
-                })
-                .unwrap_or_default(),
+            extra,
         };
 
         let kid = s_field(obj, "kid")?;

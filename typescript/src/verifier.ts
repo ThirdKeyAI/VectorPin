@@ -50,6 +50,22 @@ export interface VerifyOptions {
   expectedModel?: string;
 }
 
+/** Maximum length of an attacker-controlled substring in `detail`. */
+const MAX_DETAIL_FIELD = 64;
+
+/**
+ * Strip control characters and newlines from any attacker-controllable
+ * field before embedding it in a `detail` string. Keeps the message
+ * legible without giving an attacker a vector to inject log entries
+ * or terminal escape sequences.
+ */
+function sanitizeDetail(s: string): string {
+  // Replace ASCII control chars and DEL with '?'.
+  const cleaned = s.replace(/[\x00-\x1f\x7f]/g, '?');
+  if (cleaned.length <= MAX_DETAIL_FIELD) return cleaned;
+  return cleaned.slice(0, MAX_DETAIL_FIELD) + '...';
+}
+
 /**
  * Verifies Pin attestations against a key registry.
  *
@@ -86,20 +102,24 @@ export class Verifier {
    * you have the corresponding ground truth on hand — the signature
    * check always runs; the others are gated on what you supply.
    */
-  verify(pin: Pin, opts: VerifyOptions = {}): VerificationResult {
+  async verify(pin: Pin, opts: VerifyOptions = {}): Promise<VerificationResult> {
     if (pin.header.v !== PROTOCOL_VERSION) {
       return result(false, 'unsupported_version', `pin version ${pin.header.v} not supported`);
     }
 
     const publicKey = this.#keys.get(pin.kid);
     if (!publicKey) {
-      return result(false, 'unknown_key', `no registered public key for kid=${pin.kid}`);
+      return result(
+        false,
+        'unknown_key',
+        `no registered public key for kid=${sanitizeDetail(pin.kid)}`,
+      );
     }
 
     const canonical = canonicalizeHeader(pin.header);
     let sigValid: boolean;
     try {
-      sigValid = ed25519.verify(pin.sig, canonical, publicKey);
+      sigValid = await ed25519.verifyAsync(pin.sig, canonical, publicKey);
     } catch {
       sigValid = false;
     }
@@ -136,7 +156,9 @@ export class Verifier {
       return result(
         false,
         'model_mismatch',
-        `pin model ${pin.header.model} != expected ${opts.expectedModel}`,
+        `pin model ${sanitizeDetail(pin.header.model)} != expected ${sanitizeDetail(
+          opts.expectedModel,
+        )}`,
       );
     }
 

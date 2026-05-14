@@ -9,7 +9,7 @@ fn main() {
     let embedding: Vec<f32> = (0..128).map(|i| (i as f32) * 0.01).collect();
     let source = "The quick brown fox jumps over the lazy dog.";
 
-    let signer = Signer::generate("demo-2026-05".to_string());
+    let signer = Signer::generate("demo-2026-05".to_string()).expect("non-empty kid");
     let pin = signer
         .pin(source, "text-embedding-3-large", embedding.as_slice())
         .expect("pin creation");
@@ -19,7 +19,9 @@ fn main() {
     println!();
 
     let mut verifier = Verifier::new();
-    verifier.add_key(signer.key_id(), signer.public_key_bytes());
+    verifier
+        .add_key(signer.key_id(), signer.public_key_bytes())
+        .expect("valid public key");
 
     // 1. honest verify
     let r = verifier.verify_full::<&[f32]>(&pin, Some(source), Some(embedding.as_slice()), None);
@@ -41,7 +43,7 @@ fn main() {
     println!("3. wrong source text          -> {:?}", r);
 
     // 4. wrong signing key (rogue signer with same kid as legit)
-    let rogue = Signer::generate("demo-2026-05".to_string());
+    let rogue = Signer::generate("demo-2026-05".to_string()).expect("non-empty kid");
     let rogue_pin = rogue
         .pin(source, "m", embedding.as_slice())
         .expect("rogue pin");

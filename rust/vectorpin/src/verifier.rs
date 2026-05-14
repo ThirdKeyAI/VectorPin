@@ -20,12 +20,12 @@
 //! ```
 //! use vectorpin::{Signer, Verifier};
 //!
-//! let signer = Signer::generate("k1".to_string());
+//! let signer = Signer::generate("k1".to_string()).unwrap();
 //! let v: Vec<f32> = vec![1.0, 2.0, 3.0];
 //! let pin = signer.pin("hello", "m", v.as_slice()).unwrap();
 //!
 //! let mut verifier = Verifier::new();
-//! verifier.add_key(signer.key_id(), signer.public_key_bytes());
+//! verifier.add_key(signer.key_id(), signer.public_key_bytes()).unwrap();
 //! verifier
 //!     .verify_full(&pin, Some("hello"), Some(v.as_slice()), None)
 //!     .expect("honest verify must pass");
@@ -36,11 +36,11 @@
 //!
 //! ```
 //! # use vectorpin::{Signer, Verifier};
-//! # let signer = Signer::generate("k1".to_string());
+//! # let signer = Signer::generate("k1".to_string()).unwrap();
 //! # let v: Vec<f32> = vec![1.0, 2.0, 3.0];
 //! # let pin = signer.pin("hello", "m", v.as_slice()).unwrap();
 //! # let mut verifier = Verifier::new();
-//! # verifier.add_key(signer.key_id(), signer.public_key_bytes());
+//! # verifier.add_key(signer.key_id(), signer.public_key_bytes()).unwrap();
 //! verifier.verify_signature(&pin).unwrap();
 //! ```
 //!
@@ -48,11 +48,11 @@
 //!
 //! ```
 //! # use vectorpin::{Signer, Verifier, VerifyError};
-//! # let signer = Signer::generate("k1".to_string());
+//! # let signer = Signer::generate("k1".to_string()).unwrap();
 //! # let v: Vec<f32> = vec![1.0, 2.0, 3.0];
 //! # let pin = signer.pin("hello", "m", v.as_slice()).unwrap();
 //! # let mut verifier = Verifier::new();
-//! # verifier.add_key(signer.key_id(), signer.public_key_bytes());
+//! # verifier.add_key(signer.key_id(), signer.public_key_bytes()).unwrap();
 //! let mut tampered = v.clone();
 //! tampered[0] += 1e-5;
 //! let err = verifier
@@ -67,11 +67,11 @@
 //! ```
 //! use vectorpin::{Signer, Verifier};
 //!
-//! let old = Signer::generate("2026-04".to_string());
-//! let new = Signer::generate("2026-05".to_string());
+//! let old = Signer::generate("2026-04".to_string()).unwrap();
+//! let new = Signer::generate("2026-05".to_string()).unwrap();
 //! let mut verifier = Verifier::new();
-//! verifier.add_key(old.key_id(), old.public_key_bytes());
-//! verifier.add_key(new.key_id(), new.public_key_bytes());
+//! verifier.add_key(old.key_id(), old.public_key_bytes()).unwrap();
+//! verifier.add_key(new.key_id(), new.public_key_bytes()).unwrap();
 //!
 //! let v: Vec<f32> = vec![1.0, 2.0];
 //! let pin_old = old.pin("hello", "m", v.as_slice()).unwrap();
@@ -119,6 +119,9 @@ pub enum VerifyError {
     },
     /// Pin failed to parse one of its dtype-related fields.
     UnsupportedDtype(String),
+    /// A public key handed to [`Verifier::add_key`] could not be decoded
+    /// as a valid Ed25519 verifying key.
+    KeyDecodeFailed(String),
 }
 
 impl std::fmt::Display for VerifyError {
@@ -145,6 +148,9 @@ impl std::fmt::Display for VerifyError {
                 )
             }
             VerifyError::UnsupportedDtype(s) => write!(f, "unsupported canonical dtype: {s}"),
+            VerifyError::KeyDecodeFailed(reason) => {
+                write!(f, "failed to decode ed25519 public key: {reason}")
+            }
         }
     }
 }
@@ -166,10 +172,15 @@ impl Verifier {
 
     /// Register a public key under `kid`. Multiple keys may live in
     /// the registry simultaneously to support rotation.
-    pub fn add_key(&mut self, kid: &str, public_key_bytes: [u8; 32]) {
-        if let Ok(vk) = VerifyingKey::from_bytes(&public_key_bytes) {
-            self.keys.insert(kid.to_owned(), vk);
-        }
+    ///
+    /// Returns [`VerifyError::KeyDecodeFailed`] if the supplied bytes
+    /// are not a valid Ed25519 public key encoding (previously such
+    /// keys were silently dropped).
+    pub fn add_key(&mut self, kid: &str, public_key_bytes: [u8; 32]) -> Result<(), VerifyError> {
+        let vk = VerifyingKey::from_bytes(&public_key_bytes)
+            .map_err(|e| VerifyError::KeyDecodeFailed(e.to_string()))?;
+        self.keys.insert(kid.to_owned(), vk);
+        Ok(())
     }
 
     /// Number of registered keys (sanity check for tests).
@@ -219,7 +230,10 @@ impl Verifier {
 
         if let Some(vec) = vector {
             let vec = vec.into();
-            if vec.len() as u32 != pin.header.vec_dim {
+            let len_matches = u32::try_from(vec.len())
+                .map(|n| n == pin.header.vec_dim)
+                .unwrap_or(false);
+            if !len_matches {
                 return Err(VerifyError::ShapeMismatch {
                     supplied: vec.len(),
                     expected: pin.header.vec_dim,
@@ -257,9 +271,11 @@ mod tests {
     use crate::signer::Signer;
 
     fn fixture(kid: &str) -> (Signer, Verifier, Vec<f32>) {
-        let signer = Signer::generate(kid.into());
+        let signer = Signer::generate(kid.into()).unwrap();
         let mut verifier = Verifier::new();
-        verifier.add_key(signer.key_id(), signer.public_key_bytes());
+        verifier
+            .add_key(signer.key_id(), signer.public_key_bytes())
+            .unwrap();
         let v: Vec<f32> = (0..16).map(|i| (i as f32) * 0.1).collect();
         (signer, verifier, v)
     }
@@ -304,12 +320,14 @@ mod tests {
 
     #[test]
     fn unknown_key_is_caught() {
-        let signer = Signer::generate("rogue".into());
+        let signer = Signer::generate("rogue".into()).unwrap();
         let v: Vec<f32> = vec![1.0, 2.0, 3.0];
         let pin = signer.pin("x", "m", v.as_slice()).unwrap();
-        let other = Signer::generate("prod".into());
+        let other = Signer::generate("prod".into()).unwrap();
         let mut verifier = Verifier::new();
-        verifier.add_key(other.key_id(), other.public_key_bytes());
+        verifier
+            .add_key(other.key_id(), other.public_key_bytes())
+            .unwrap();
         let err = verifier.verify_signature(&pin).unwrap_err();
         assert!(matches!(err, VerifyError::UnknownKey(_)));
     }
@@ -337,11 +355,15 @@ mod tests {
 
     #[test]
     fn key_rotation_works() {
-        let old = Signer::generate("2026-04".into());
-        let new = Signer::generate("2026-05".into());
+        let old = Signer::generate("2026-04".into()).unwrap();
+        let new = Signer::generate("2026-05".into()).unwrap();
         let mut verifier = Verifier::new();
-        verifier.add_key(old.key_id(), old.public_key_bytes());
-        verifier.add_key(new.key_id(), new.public_key_bytes());
+        verifier
+            .add_key(old.key_id(), old.public_key_bytes())
+            .unwrap();
+        verifier
+            .add_key(new.key_id(), new.public_key_bytes())
+            .unwrap();
         let v: Vec<f32> = vec![1.0, 2.0];
         verifier
             .verify_signature(&old.pin("x", "m", v.as_slice()).unwrap())

@@ -23,11 +23,34 @@ reject unknown versions.
 from __future__ import annotations
 
 import base64
+import binascii
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 PROTOCOL_VERSION = 1
+
+# Cap on the byte length of a JSON-encoded Pin we'll attempt to parse.
+# Pin JSON in practice is well under a kilobyte; anything beyond this is
+# either an attack or a corrupt record we don't want to allocate memory
+# for.
+MAX_PIN_JSON_BYTES = 65536
+
+# Strict format for sha256:<hex> hash strings used in source_hash,
+# vec_hash, model_hash.
+_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+# Allowed vec_dtype values. Mirrors hash.CanonicalDtype but kept local
+# to avoid an import cycle.
+_ALLOWED_DTYPES = frozenset({"f32", "f64"})
+
+# Hard ceiling on vec_dim. 1M components is far above any real embedding
+# while still preventing pathological allocations downstream.
+_MAX_VEC_DIM = 1_048_576
+
+# Ed25519 raw signatures are exactly 64 bytes.
+_SIG_LEN = 64
 
 
 def _b64(data: bytes) -> str:
@@ -110,21 +133,94 @@ class Pin:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Pin:
-        if d.get("v") != PROTOCOL_VERSION:
-            raise ValueError(f"unsupported pin version {d.get('v')!r}; expected {PROTOCOL_VERSION}")
+        if not isinstance(d, dict):
+            raise ValueError("pin must be a JSON object")
+
+        v = d.get("v")
+        if v != PROTOCOL_VERSION:
+            raise ValueError(f"unsupported pin version {v!r}; expected {PROTOCOL_VERSION}")
+
+        model = d.get("model")
+        if not isinstance(model, str) or not model:
+            raise ValueError("model must be a non-empty string")
+
+        kid = d.get("kid")
+        if not isinstance(kid, str) or not kid:
+            raise ValueError("kid must be a non-empty string")
+
+        vec_dtype = d.get("vec_dtype")
+        if vec_dtype not in _ALLOWED_DTYPES:
+            raise ValueError(
+                f"vec_dtype must be one of {sorted(_ALLOWED_DTYPES)}; got {vec_dtype!r}"
+            )
+
+        vec_dim_raw = d.get("vec_dim")
+        # bool is a subclass of int; explicitly reject it.
+        if not isinstance(vec_dim_raw, int) or isinstance(vec_dim_raw, bool):
+            raise ValueError(f"vec_dim must be an int; got {type(vec_dim_raw).__name__}")
+        if not (0 < vec_dim_raw <= _MAX_VEC_DIM):
+            raise ValueError(
+                f"vec_dim must be in (0, {_MAX_VEC_DIM}]; got {vec_dim_raw}"
+            )
+
+        source_hash = d.get("source_hash")
+        if not isinstance(source_hash, str) or not _HASH_RE.match(source_hash):
+            raise ValueError("source_hash must match 'sha256:<64 hex chars>'")
+
+        vec_hash = d.get("vec_hash")
+        if not isinstance(vec_hash, str) or not _HASH_RE.match(vec_hash):
+            raise ValueError("vec_hash must match 'sha256:<64 hex chars>'")
+
+        model_hash = d.get("model_hash")
+        if model_hash is not None:
+            if not isinstance(model_hash, str) or not _HASH_RE.match(model_hash):
+                raise ValueError("model_hash must match 'sha256:<64 hex chars>'")
+
+        ts = d.get("ts")
+        if not isinstance(ts, str) or not ts:
+            raise ValueError("ts must be a non-empty string")
+
+        extra_raw = d.get("extra", {})
+        if not isinstance(extra_raw, dict):
+            raise ValueError("extra must be an object")
+        extra: dict[str, str] = {}
+        for k, val in extra_raw.items():
+            if not isinstance(k, str):
+                raise ValueError("extra keys must be strings")
+            if not isinstance(val, str):
+                raise ValueError("extra values must be strings")
+            extra[k] = val
+
+        sig_raw = d.get("sig")
+        if not isinstance(sig_raw, str):
+            raise ValueError("sig must be a base64-encoded string")
+        try:
+            sig_bytes = _b64dec(sig_raw)
+        except (binascii.Error, ValueError) as e:
+            raise ValueError(f"sig is not valid base64: {e}") from e
+        if len(sig_bytes) != _SIG_LEN:
+            raise ValueError(
+                f"sig must decode to exactly {_SIG_LEN} bytes; got {len(sig_bytes)}"
+            )
+
         header = PinHeader(
-            v=d["v"],
-            model=d["model"],
-            source_hash=d["source_hash"],
-            vec_hash=d["vec_hash"],
-            vec_dtype=d["vec_dtype"],
-            vec_dim=int(d["vec_dim"]),
-            ts=d["ts"],
-            model_hash=d.get("model_hash"),
-            extra=dict(d.get("extra", {})),
+            v=v,
+            model=model,
+            source_hash=source_hash,
+            vec_hash=vec_hash,
+            vec_dtype=vec_dtype,
+            vec_dim=int(vec_dim_raw),
+            ts=ts,
+            model_hash=model_hash,
+            extra=extra,
         )
-        return cls(header=header, kid=d["kid"], sig=_b64dec(d["sig"]))
+        return cls(header=header, kid=kid, sig=sig_bytes)
 
     @classmethod
     def from_json(cls, s: str) -> Pin:
+        # Measure the raw byte size *before* json.loads runs so we cap
+        # parser memory use, not just the resulting object.
+        s_bytes = s.encode("utf-8") if isinstance(s, str) else s
+        if len(s_bytes) > MAX_PIN_JSON_BYTES:
+            raise ValueError("pin JSON too large")
         return cls.from_dict(json.loads(s))

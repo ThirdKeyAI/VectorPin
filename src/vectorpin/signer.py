@@ -58,8 +58,27 @@ class Signer:
         return cls(Ed25519PrivateKey.from_private_bytes(raw), key_id)
 
     @classmethod
-    def from_pem(cls, pem: bytes, key_id: str, password: bytes | None = None) -> Signer:
-        """Load a signer from PEM-encoded PKCS#8 ed25519 key material."""
+    def from_pem(
+        cls,
+        pem: bytes,
+        key_id: str,
+        password: bytes | None = None,
+        *,
+        allow_unencrypted: bool = False,
+    ) -> Signer:
+        """Load a signer from PEM-encoded PKCS#8 ed25519 key material.
+
+        Callers must either provide a `password` to decrypt an
+        encrypted PEM, or set `allow_unencrypted=True` to opt in to
+        loading an unencrypted file. The default is to refuse:
+        unencrypted private keys on disk are a footgun, and we want a
+        positive confirmation that the caller knew the file lacked
+        encryption.
+        """
+        if password is None and not allow_unencrypted:
+            raise ValueError(
+                "PEM is unencrypted; pass allow_unencrypted=True to confirm"
+            )
         key = serialization.load_pem_private_key(pem, password=password)
         if not isinstance(key, Ed25519PrivateKey):
             raise TypeError(f"expected Ed25519PrivateKey, got {type(key).__name__}")

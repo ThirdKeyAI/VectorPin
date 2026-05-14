@@ -28,7 +28,7 @@
 //! use vectorpin::{Signer, Verifier};
 //!
 //! // Ingestion: produce an embedding, sign a pin for it.
-//! let signer = Signer::generate("prod-2026-05".to_string());
+//! let signer = Signer::generate("prod-2026-05".to_string()).expect("non-empty kid");
 //! let embedding: Vec<f32> = vec![0.1, 0.2, 0.3, /* ... */];
 //! let pin = signer
 //!     .pin("The quick brown fox.", "text-embedding-3-large", embedding.as_slice())
@@ -40,7 +40,7 @@
 //! // Read/audit: parse the stored JSON and verify against ground truth.
 //! let parsed = vectorpin::Pin::from_json(&stored).expect("parse pin");
 //! let mut verifier = Verifier::new();
-//! verifier.add_key(signer.key_id(), signer.public_key_bytes());
+//! verifier.add_key(signer.key_id(), signer.public_key_bytes()).expect("valid pubkey");
 //!
 //! let result = verifier.verify_full(
 //!     &parsed,
@@ -125,6 +125,26 @@
 #![warn(rust_2018_idioms)]
 #![warn(rustdoc::broken_intra_doc_links)]
 #![warn(rustdoc::missing_crate_level_docs)]
+#![forbid(unsafe_code)]
+
+// CHANGELOG (security hardening, branch `security/p2-hardening`):
+//   * BREAKING: `Signer::private_key_bytes` now returns
+//     `zeroize::Zeroizing<[u8; 32]>` (was `[u8; 32]`). The seed is zeroed
+//     on drop; deref to `&[u8; 32]` to use it.
+//   * BREAKING: `Signer::generate` now returns
+//     `Result<Self, SignerError>` (was panic on empty `key_id`). Empty
+//     `key_id` yields `SignerError::EmptyKeyId`.
+//   * BREAKING: `Verifier::add_key` now returns
+//     `Result<(), VerifyError>` (was silently dropping malformed public
+//     keys). Bad keys yield `VerifyError::KeyDecodeFailed`.
+//   * BREAKING: `Pin::from_json` now rejects pins whose `extra` map
+//     contains non-string values with `AttestationError::ExtraTypeMismatch`
+//     (previously silently dropped).
+//   * Internal: `vec_dim` cast is now checked (`u32::try_from`); oversize
+//     vectors return `SignerError::InvalidVector` or are treated as a
+//     shape mismatch on the verifier side.
+//   * Internal: timestamp formatting now uses the `time` crate.
+//   * Internal: `#![forbid(unsafe_code)]` applied to the crate.
 
 pub mod attestation;
 pub mod hash;

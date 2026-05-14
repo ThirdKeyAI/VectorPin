@@ -270,5 +270,47 @@ def test_parser_registers_new_audit_commands() -> None:
             parser.parse_args([cmd, "--help"])
 
 
+# ---- fail-open behavior on malformed pins ----
+
+
+def test_audit_loop_survives_malformed_pin(tmp_path: Path):
+    """A row that raises ValueError during yield must not abort the audit."""
+    from vectorpin.adapters.base import PinnedRecord
+    from vectorpin.cli import _audit_loop
+
+    signer = Signer.generate(key_id="kid")
+    verifier_obj = __import__("vectorpin").Verifier({"kid": signer.public_key_bytes()})
+
+    vec = np.zeros(8, dtype=np.float32)
+    pin = signer.pin(source="hello", model="m", vector=vec)
+    good_a = PinnedRecord(id="a", vector=vec, pin=pin, metadata={})
+    good_b = PinnedRecord(id="b", vector=vec, pin=pin, metadata={})
+
+    def records():
+        yield good_a
+        yield good_b
+        raise ValueError("simulated malformed pin row")
+
+    out = io.StringIO()
+    err = io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        code = _audit_loop(
+            records(),
+            verifier_obj,
+            source_column=None,
+            label_field="table",
+            label_value="t",
+        )
+
+    summary = json.loads(out.getvalue())
+    # The two good rows must be tallied; the bad row must increment
+    # `total` and `bad` (verification_failed) but not abort.
+    assert summary["verified_ok"] == 2
+    assert summary["verification_failed"] == 1
+    assert summary["total"] == 3
+    assert "parse_error" in err.getvalue()
+    assert code == 1
+
+
 # Defensive: the unused-import linter shouldn't complain about np in this file.
 _NUMPY_VERSION = np.__version__
