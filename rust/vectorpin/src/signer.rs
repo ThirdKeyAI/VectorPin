@@ -208,9 +208,7 @@ fn now_utc_iso8601() -> String {
     // form, matching the existing wire-format contract. The v1.1 branch
     // is responsible for any tightening of this format.
     let now = time::OffsetDateTime::now_utc();
-    let fmt = time::macros::format_description!(
-        "[year]-[month]-[day]T[hour]:[minute]:[second]Z"
-    );
+    let fmt = time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
     now.format(&fmt)
         .expect("UTC OffsetDateTime always formats with a fixed description")
 }
