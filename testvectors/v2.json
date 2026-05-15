@@ -1,0 +1,79 @@
+{
+  "version": 2,
+  "domain_tag_b64": "dmVjdG9ycGluL3YyAA",
+  "comment": "Cross-language test vectors for VectorPin protocol v2. The signing key seed is intentionally public \u2014 it exists only to make these fixtures reproducible. Do not use in production.",
+  "key_id": "test-vectors-v2-2026-05",
+  "public_key_b64": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+  "private_key_b64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+  "fixtures": [
+    {
+      "name": "vector_0_f32_small",
+      "description": "Small f32 vector, no extras, no model_hash.",
+      "input": {
+        "source": "hello world",
+        "model": "test-model-v1",
+        "vec_b64": "bL8APn9GB7698iM_39XWPaEhCb_9Irk-eemmP-Zzcj_-JzS_Vfmhv-qOH79uRSk9Ts0UwOwKYL4Dep-_4HU7vw",
+        "vec_dtype": "f32",
+        "vec_dim": 16,
+        "timestamp": "2026-05-05T12:00:00Z"
+      },
+      "pin_json": "{\"kid\":\"test-vectors-v2-2026-05\",\"model\":\"test-model-v1\",\"sig\":\"UOiAisL0mR2C1OJ8-t2I8L2mS1lYJrOQxAG1dHFhbJWWBsFzzpRLHo2dm11mVQh4n1a92Xt4bkSQnE_KFaebBg\",\"source_hash\":\"sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9\",\"ts\":\"2026-05-05T12:00:00Z\",\"v\":2,\"vec_dim\":16,\"vec_dtype\":\"f32\",\"vec_hash\":\"sha256:5f74ef6ec2c639ff447cb52256353b79599321a956d6cf9921aa9599585cb836\"}",
+      "expected_canonical_bytes_b64": "dmVjdG9ycGluL3YyAHsia2lkIjoidGVzdC12ZWN0b3JzLXYyLTIwMjYtMDUiLCJtb2RlbCI6InRlc3QtbW9kZWwtdjEiLCJzb3VyY2VfaGFzaCI6InNoYTI1NjpiOTRkMjdiOTkzNGQzZTA4YTUyZTUyZDdkYTdkYWJmYWM0ODRlZmUzN2E1MzgwZWU5MDg4ZjdhY2UyZWZjZGU5IiwidHMiOiIyMDI2LTA1LTA1VDEyOjAwOjAwWiIsInYiOjIsInZlY19kaW0iOjE2LCJ2ZWNfZHR5cGUiOiJmMzIiLCJ2ZWNfaGFzaCI6InNoYTI1Njo1Zjc0ZWY2ZWMyYzYzOWZmNDQ3Y2I1MjI1NjM1M2I3OTU5OTMyMWE5NTZkNmNmOTkyMWFhOTU5OTU4NWNiODM2In0",
+      "expected_vec_hash": "sha256:5f74ef6ec2c639ff447cb52256353b79599321a956d6cf9921aa9599585cb836",
+      "expected_source_hash": "sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+    },
+    {
+      "name": "vector_1_f64_small",
+      "description": "Small f64 vector with multi-line source.",
+      "input": {
+        "source": "multi\nline\ntext",
+        "model": "test-model-v1",
+        "vec_b64": "obO7KA0e1j8faAQiskrqPwr85YzhJdU_B5a0ZbvZ9L_zSdPdrPjsP0dxhKdmkdw_dVIrjbgu4b8iYZT-hJjiPw",
+        "vec_dtype": "f64",
+        "vec_dim": 8,
+        "timestamp": "2026-05-05T12:00:00Z"
+      },
+      "pin_json": "{\"kid\":\"test-vectors-v2-2026-05\",\"model\":\"test-model-v1\",\"sig\":\"kXp0DaM4TlCyFC8G3KXTW2j1Ao698NJPTcO1i0yocEkkhWJeD31de8R7isieFYkZo3umyJMEPz1ZZtUKulCvAQ\",\"source_hash\":\"sha256:40d2ac7e90e01413544cf5bd00823522b99d4343f045724fae516ad694e1aad5\",\"ts\":\"2026-05-05T12:00:00Z\",\"v\":2,\"vec_dim\":8,\"vec_dtype\":\"f64\",\"vec_hash\":\"sha256:064fd16f8ae7063a5448de1eedb6629434d55efd54928b4a8fedb162f7482253\"}",
+      "expected_canonical_bytes_b64": "dmVjdG9ycGluL3YyAHsia2lkIjoidGVzdC12ZWN0b3JzLXYyLTIwMjYtMDUiLCJtb2RlbCI6InRlc3QtbW9kZWwtdjEiLCJzb3VyY2VfaGFzaCI6InNoYTI1Njo0MGQyYWM3ZTkwZTAxNDEzNTQ0Y2Y1YmQwMDgyMzUyMmI5OWQ0MzQzZjA0NTcyNGZhZTUxNmFkNjk0ZTFhYWQ1IiwidHMiOiIyMDI2LTA1LTA1VDEyOjAwOjAwWiIsInYiOjIsInZlY19kaW0iOjgsInZlY19kdHlwZSI6ImY2NCIsInZlY19oYXNoIjoic2hhMjU2OjA2NGZkMTZmOGFlNzA2M2E1NDQ4ZGUxZWVkYjY2Mjk0MzRkNTVlZmQ1NDkyOGI0YThmZWRiMTYyZjc0ODIyNTMifQ",
+      "expected_vec_hash": "sha256:064fd16f8ae7063a5448de1eedb6629434d55efd54928b4a8fedb162f7482253",
+      "expected_source_hash": "sha256:40d2ac7e90e01413544cf5bd00823522b99d4343f045724fae516ad694e1aad5"
+    },
+    {
+      "name": "vector_2_with_model_hash",
+      "description": "f32 vector with optional model_hash committed under the signature. Verifiers reconstruct the signed bytes with model_hash included.",
+      "input": {
+        "source": "The quick brown fox jumps over the lazy dog.",
+        "model": "text-embedding-3-large",
+        "vec_b64": "NpdBPtjSBb8RfdO-AEEcwNBc5j8HdJI_0p2mvjAYRj_Y-o8-VccNv9xBej9FAZ--m1uoviHKSr9E8Og-WSjLvQuYCz-GcBu_Kd8BPhJsZL9Aalc_RYxAPppAqT6SLdI-gGCBv41-SD8FoQNAfLjRv1td3b9RnsC_2mlXPwrOAz4",
+        "vec_dtype": "f32",
+        "vec_dim": 32,
+        "timestamp": "2026-05-05T12:00:00Z",
+        "model_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "pin_json": "{\"kid\":\"test-vectors-v2-2026-05\",\"model\":\"text-embedding-3-large\",\"model_hash\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sig\":\"JPaznNPvaqQ9Soki5PZGbD7LS7eFzGYHYcy244t0RkalVtmPUAAmNgGRFBY4eEITjlLsPCiMJihgH1fWHhRNAg\",\"source_hash\":\"sha256:ef537f25c895bfa782526529a9b63d97aa631564d5d789c2b765448c8635fb6c\",\"ts\":\"2026-05-05T12:00:00Z\",\"v\":2,\"vec_dim\":32,\"vec_dtype\":\"f32\",\"vec_hash\":\"sha256:b98db6fc8984b750ddf3d88d4440809bc51902003f9713be00898e9c7c3bd8b1\"}",
+      "expected_canonical_bytes_b64": "dmVjdG9ycGluL3YyAHsia2lkIjoidGVzdC12ZWN0b3JzLXYyLTIwMjYtMDUiLCJtb2RlbCI6InRleHQtZW1iZWRkaW5nLTMtbGFyZ2UiLCJtb2RlbF9oYXNoIjoic2hhMjU2OmFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJzb3VyY2VfaGFzaCI6InNoYTI1NjplZjUzN2YyNWM4OTViZmE3ODI1MjY1MjlhOWI2M2Q5N2FhNjMxNTY0ZDVkNzg5YzJiNzY1NDQ4Yzg2MzVmYjZjIiwidHMiOiIyMDI2LTA1LTA1VDEyOjAwOjAwWiIsInYiOjIsInZlY19kaW0iOjMyLCJ2ZWNfZHR5cGUiOiJmMzIiLCJ2ZWNfaGFzaCI6InNoYTI1NjpiOThkYjZmYzg5ODRiNzUwZGRmM2Q4OGQ0NDQwODA5YmM1MTkwMjAwM2Y5NzEzYmUwMDg5OGU5YzdjM2JkOGIxIn0",
+      "expected_vec_hash": "sha256:b98db6fc8984b750ddf3d88d4440809bc51902003f9713be00898e9c7c3bd8b1",
+      "expected_source_hash": "sha256:ef537f25c895bfa782526529a9b63d97aa631564d5d789c2b765448c8635fb6c"
+    },
+    {
+      "name": "vector_3_with_extra_and_record_id",
+      "description": "f32 vector with a free-form extra entry plus the reserved vectorpin.record_id replay-protection key. Source is NFC-normalized Unicode ('caf\u00e9').",
+      "input": {
+        "source": "caf\u00e9",
+        "model": "unicode-model",
+        "vec_b64": "a54CQASQI8ANEdY-WVkRv6bB576BxVy-dEcBwK5_bb6bfl2_BqxUQJs0Zz4GjLS-6ASQvhYFK78sD4e_ERfIvg",
+        "vec_dtype": "f32",
+        "vec_dim": 16,
+        "timestamp": "2026-05-05T12:00:00Z",
+        "extra": {
+          "region": "us-west",
+          "vectorpin.record_id": "rec-2026-05-05-001"
+        }
+      },
+      "pin_json": "{\"extra\":{\"region\":\"us-west\",\"vectorpin.record_id\":\"rec-2026-05-05-001\"},\"kid\":\"test-vectors-v2-2026-05\",\"model\":\"unicode-model\",\"sig\":\"Ag2L1crLsMRGRFKX-V4ghJRJXYaz79BzFfFqzlSPOvhelX35OVxSB6iLA1y4VqWN9CSOytolgr2uwP2hixt0Ag\",\"source_hash\":\"sha256:850f7dc43910ff890f8879c0ed26fe697c93a067ad93a7d50f466a7028a9bf4e\",\"ts\":\"2026-05-05T12:00:00Z\",\"v\":2,\"vec_dim\":16,\"vec_dtype\":\"f32\",\"vec_hash\":\"sha256:786591a1975a5b9811dde437f033950a1aecab1f54876a55c43531ae2883c49e\"}",
+      "expected_canonical_bytes_b64": "dmVjdG9ycGluL3YyAHsiZXh0cmEiOnsicmVnaW9uIjoidXMtd2VzdCIsInZlY3RvcnBpbi5yZWNvcmRfaWQiOiJyZWMtMjAyNi0wNS0wNS0wMDEifSwia2lkIjoidGVzdC12ZWN0b3JzLXYyLTIwMjYtMDUiLCJtb2RlbCI6InVuaWNvZGUtbW9kZWwiLCJzb3VyY2VfaGFzaCI6InNoYTI1Njo4NTBmN2RjNDM5MTBmZjg5MGY4ODc5YzBlZDI2ZmU2OTdjOTNhMDY3YWQ5M2E3ZDUwZjQ2NmE3MDI4YTliZjRlIiwidHMiOiIyMDI2LTA1LTA1VDEyOjAwOjAwWiIsInYiOjIsInZlY19kaW0iOjE2LCJ2ZWNfZHR5cGUiOiJmMzIiLCJ2ZWNfaGFzaCI6InNoYTI1Njo3ODY1OTFhMTk3NWE1Yjk4MTFkZGU0MzdmMDMzOTUwYTFhZWNhYjFmNTQ4NzZhNTVjNDM1MzFhZTI4ODNjNDllIn0",
+      "expected_vec_hash": "sha256:786591a1975a5b9811dde437f033950a1aecab1f54876a55c43531ae2883c49e",
+      "expected_source_hash": "sha256:850f7dc43910ff890f8879c0ed26fe697c93a067ad93a7d50f466a7028a9bf4e"
+    }
+  ]
+}

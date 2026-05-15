@@ -1,9 +1,10 @@
 // Copyright 2025 Jascha Wanger / Tarnover, LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//! Mirror of `examples/basic_usage.py` — runs the same four scenarios.
+//! Mirror of `examples/basic_usage.py` — runs the same scenarios against
+//! the v2 wire format.
 
-use vectorpin::{Pin, Signer, Verifier};
+use vectorpin::{Pin, Signer, Verifier, VerifyOptions};
 
 fn main() {
     let embedding: Vec<f32> = (0..128).map(|i| (i as f32) * 0.01).collect();
@@ -47,6 +48,26 @@ fn main() {
         .expect("rogue pin");
     let r = verifier.verify_signature(&rogue_pin);
     println!("4. forged with wrong key      -> {:?}", r);
+
+    // 5. replay-protection: pin with a record_id; verifier enforces a
+    //    different expected record_id.
+    let opts = vectorpin::signer::PinOptions {
+        extra: [("vectorpin.record_id".to_string(), "rec-1".to_string())]
+            .into_iter()
+            .collect(),
+        ..vectorpin::signer::PinOptions::default()
+    };
+    let scoped_pin = signer
+        .pin_with_options(source, "m", embedding.as_slice(), opts)
+        .expect("scoped pin");
+    let r = verifier.verify(
+        &scoped_pin,
+        VerifyOptions {
+            expected_record_id: Some("rec-other"),
+            ..VerifyOptions::default()
+        },
+    );
+    println!("5. record_id mismatch         -> {:?}", r);
 
     let restored = Pin::from_json(&pin.to_json()).expect("round trip");
     assert_eq!(restored, pin);

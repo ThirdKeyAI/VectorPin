@@ -79,7 +79,7 @@ def test_re_signed_pin_with_wrong_kid_is_caught(verifier: Verifier, vector: np.n
     # Attacker re-signs the modified body but the verifier registry has
     # only the legit public key for this kid, so signature fails.
     forged_sig = other_signer._private_key.sign(pin.header.canonicalize())
-    forged = Pin(header=pin.header, kid=pin.kid, sig=forged_sig)
+    forged = Pin(header=pin.header, sig=forged_sig)
     verifier_with_legit = Verifier({"test-key-1": legit_signer.public_key()})
     result = verifier_with_legit.verify(forged)
     assert not result.ok
@@ -132,3 +132,27 @@ def test_pin_json_round_trip_with_verification(
     json_str = pin.to_json()
     restored = Pin.from_json(json_str)
     assert verifier.verify(restored, source="hello", vector=vector)
+
+
+def test_verify_rejects_wrong_length_sig(signer: Signer, verifier: Verifier, vector: np.ndarray):
+    """A Pin assembled by hand with a too-short sig must fail signature_invalid.
+
+    We bypass Pin.from_dict (which would catch this earlier) by
+    constructing the dataclass directly, mirroring what would happen
+    if a caller pulled the dataclass straight out of a partially-validated
+    pipeline.
+    """
+    pin = signer.pin(source="x", model="m", vector=vector)
+    bad = Pin(header=pin.header, sig=b"\x00" * 32)
+    result = verifier.verify(bad)
+    assert not result.ok
+    assert result.error is VerifyError.SIGNATURE_INVALID
+    assert "64 bytes" in result.detail
+
+
+def test_verify_rejects_non_bytes_sig(signer: Signer, verifier: Verifier, vector: np.ndarray):
+    pin = signer.pin(source="x", model="m", vector=vector)
+    bad = Pin(header=pin.header, sig="not bytes")  # type: ignore[arg-type]
+    result = verifier.verify(bad)
+    assert not result.ok
+    assert result.error is VerifyError.SIGNATURE_INVALID

@@ -16,6 +16,8 @@ accept multiple kids during the rotation window.
 
 from __future__ import annotations
 
+import math
+import unicodedata
 from datetime import UTC, datetime
 
 import numpy as np
@@ -25,8 +27,26 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
-from vectorpin.attestation import PROTOCOL_VERSION, Pin, PinHeader
+from vectorpin.attestation import (
+    PROTOCOL_VERSION,
+    Pin,
+    PinHeader,
+    _check_nfc,
+    _check_string_safe,
+)
 from vectorpin.hash import CanonicalDtype, hash_text, hash_vector
+
+
+def _normalize_str(value: str, field_name: str) -> str:
+    """NFC-normalize + reject control/bidi characters in a string input.
+
+    Signers tolerate non-NFC input (they normalize before signing) but
+    still reject structurally hostile characters so the signed pin is
+    always parseable by a strict verifier.
+    """
+    nfc = unicodedata.normalize("NFC", value)
+    _check_string_safe(nfc, field_name)
+    return nfc
 
 
 class Signer:
@@ -40,8 +60,11 @@ class Signer:
     def __init__(self, private_key: Ed25519PrivateKey, key_id: str):
         if not key_id:
             raise ValueError("key_id must be non-empty")
+        # Normalize/validate the key id once at construction so every
+        # subsequent Pin emits a header parseable by a strict verifier.
+        normalized = _normalize_str(key_id, "key_id")
         self._private_key = private_key
-        self._key_id = key_id
+        self._key_id = normalized
 
     @classmethod
     def generate(cls, key_id: str) -> Signer:
@@ -58,8 +81,27 @@ class Signer:
         return cls(Ed25519PrivateKey.from_private_bytes(raw), key_id)
 
     @classmethod
-    def from_pem(cls, pem: bytes, key_id: str, password: bytes | None = None) -> Signer:
-        """Load a signer from PEM-encoded PKCS#8 ed25519 key material."""
+    def from_pem(
+        cls,
+        pem: bytes,
+        key_id: str,
+        password: bytes | None = None,
+        *,
+        allow_unencrypted: bool = False,
+    ) -> Signer:
+        """Load a signer from PEM-encoded PKCS#8 ed25519 key material.
+
+        Callers must either provide a `password` to decrypt an
+        encrypted PEM, or set `allow_unencrypted=True` to opt in to
+        loading an unencrypted file. The default is to refuse:
+        unencrypted private keys on disk are a footgun, and we want a
+        positive confirmation that the caller knew the file lacked
+        encryption.
+        """
+        if password is None and not allow_unencrypted:
+            raise ValueError(
+                "PEM is unencrypted; pass allow_unencrypted=True to confirm"
+            )
         key = serialization.load_pem_private_key(pem, password=password)
         if not isinstance(key, Ed25519PrivateKey):
             raise TypeError(f"expected Ed25519PrivateKey, got {type(key).__name__}")
@@ -100,6 +142,10 @@ class Signer:
     ) -> Pin:
         """Create a Pin for (source, model, vector).
 
+        Per §3.2, vectors containing NaN, +inf, or -inf are rejected at
+        sign time. Per §3.1, every string-typed input is NFC-normalized
+        and checked for control characters and bidi overrides.
+
         Args:
             source: The exact source text the embedding was produced from.
                 Hashed and committed to; the verifier needs the same text
@@ -118,20 +164,63 @@ class Signer:
             A signed Pin. Serialize with `pin.to_json()` and store
             alongside the vector in the DB metadata.
         """
+        # Reject NaN / Inf at sign time so a signer never commits to a
+        # vector value with ambiguous hash semantics. The cast to the
+        # canonical dtype happens here too so we catch overflows that
+        # would silently become +inf in f32.
+        target = np.dtype("<f4") if vec_dtype == "f32" else np.dtype("<f8")
+        if vector.ndim != 1:
+            raise ValueError(f"expected 1-D vector, got shape {vector.shape}")
+        cast = vector.astype(target, copy=False)
+        if not np.isfinite(cast).all():
+            raise ValueError(
+                "vector contains NaN or infinity; refusing to sign"
+            )
+        # Sanity-check: the unrounded array was finite too. Catches a
+        # caller passing inf in f64 that got clipped by the cast.
+        if not np.isfinite(vector).all() and not all(
+            math.isfinite(float(x)) for x in vector
+        ):
+            raise ValueError(
+                "vector contains NaN or infinity; refusing to sign"
+            )
+
+        # Normalize string inputs. The signer is intentionally
+        # tolerant here: if a caller passes an NFD string we silently
+        # NFC it, but we still reject control chars and bidi overrides.
+        model_norm = _normalize_str(model, "model")
+        source_norm = unicodedata.normalize("NFC", source)
+
+        extra_norm: dict[str, str] = {}
+        if extra:
+            for k, val in extra.items():
+                if not isinstance(k, str) or not isinstance(val, str):
+                    raise ValueError(
+                        "extra must be a map of str -> str"
+                    )
+                k_norm = _normalize_str(k, f"extra key {k!r}")
+                v_norm = _normalize_str(val, f"extra[{k!r}]")
+                extra_norm[k_norm] = v_norm
+
         if timestamp is None:
             timestamp = datetime.now(UTC)
         ts_iso = timestamp.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # Defensive: the strftime above should always emit the v2 ts
+        # format, but verify so a buggy platform locale can't sneak
+        # something else through.
+        _check_nfc(ts_iso, "ts")
 
         header = PinHeader(
             v=PROTOCOL_VERSION,
-            model=model,
+            kid=self._key_id,
+            model=model_norm,
             model_hash=model_hash,
-            source_hash=hash_text(source),
-            vec_hash=hash_vector(vector, vec_dtype),
+            source_hash=hash_text(source_norm),
+            vec_hash=hash_vector(cast, vec_dtype),
             vec_dtype=vec_dtype,
-            vec_dim=int(vector.shape[0]),
+            vec_dim=int(cast.shape[0]),
             ts=ts_iso,
-            extra=dict(extra) if extra else {},
+            extra=extra_norm,
         )
         sig = self._private_key.sign(header.canonicalize())
-        return Pin(header=header, kid=self._key_id, sig=sig)
+        return Pin(header=header, sig=sig)
