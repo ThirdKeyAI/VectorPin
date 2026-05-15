@@ -14,8 +14,8 @@ abstract: >-
   post-embedding modification breaks signature verification on read. Reference
   implementations in Python, Rust, and TypeScript are byte-for-byte compatible,
   locked together by shared test vectors. Part of the ThirdKey Trust Stack.
-version: "0.1.1"
-date-released: 2026-05-07
+version: "0.2.0-rc.1"
+date-released: 2026-05-14
 keywords:
   - vector database
   - embedding store
