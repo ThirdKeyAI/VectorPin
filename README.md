@@ -7,10 +7,13 @@
 [![Rust stable](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
 [![Node 20+](https://img.shields.io/badge/node-20+-green.svg)](https://nodejs.org/)
 [![Status: beta](https://img.shields.io/badge/status-beta-yellow.svg)](#status)
+[![Docs](https://img.shields.io/badge/docs-docs.vectorpin.org-8a3a72.svg)](https://docs.vectorpin.org/)
 [![arXiv](https://img.shields.io/badge/arXiv-2605.13764-b31b1b.svg)](https://arxiv.org/abs/2605.13764)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20058256.svg)](https://doi.org/10.5281/zenodo.20058256)
 
 Vector databases are the new soft underbelly of the AI stack. Models trust them. Agents query them. Compliance audits don't yet ask about them. VectorPin pins every embedding to its source content and the model that produced it, then continuously verifies the store has not been tampered with — including covert steganographic modifications invisible to traditional DLP.
+
+**[Documentation: docs.vectorpin.org](https://docs.vectorpin.org/)** · [arXiv preprint](https://arxiv.org/abs/2605.13764) · [Source: github.com/ThirdKeyAI/VectorPin](https://github.com/ThirdKeyAI/VectorPin)
 
 Part of the [ThirdKey](https://thirdkey.ai) Trust Stack, alongside [Symbiont](https://github.com/ThirdKeyAI/Symbiont) (policy-governed agent runtime) and [SchemaPin](https://github.com/ThirdKeyAI/SchemaPin) (cryptographic tool verification).
 
