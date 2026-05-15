@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 
 use ed25519_dalek::{Signer as _, SigningKey, VerifyingKey};
 use unicode_normalization::UnicodeNormalization;
+use zeroize::Zeroizing;
 
 use crate::attestation::{
     check_nfc, check_string_safe, AttestationError, Pin, PinHeader, PROTOCOL_VERSION,
@@ -53,20 +54,23 @@ pub struct Signer {
 impl Signer {
     /// Generate a fresh Ed25519 signer. Tests and demos only.
     ///
-    /// Panics if `key_id` is empty (the API for new pins requires a kid
-    /// — tests are the only generation path and a panic is acceptable
-    /// there).
-    pub fn generate(key_id: String) -> Self {
-        assert!(!key_id.is_empty(), "key_id must be non-empty");
+    /// Returns `Err(SignerError::EmptyKeyId)` if `key_id` is empty, or
+    /// the underlying validation error if `key_id` is not NFC or
+    /// contains control characters / bidi overrides. Use a KMS-backed
+    /// signer for production.
+    pub fn generate(key_id: String) -> Result<Self, SignerError> {
+        if key_id.is_empty() {
+            return Err(SignerError::EmptyKeyId);
+        }
         // Validate the kid against v2 string rules so a generated signer
         // can never produce a pin a strict verifier would reject.
-        check_string_safe(&key_id, "key_id").expect("key_id contains unsafe chars");
-        check_nfc(&key_id, "key_id").expect("key_id is not NFC");
+        check_string_safe(&key_id, "key_id").map_err(SignerError::InvalidString)?;
+        check_nfc(&key_id, "key_id").map_err(SignerError::InvalidString)?;
         let mut rng = rand::rngs::OsRng;
-        Signer {
+        Ok(Signer {
             signing_key: SigningKey::generate(&mut rng),
             key_id,
-        }
+        })
     }
 
     /// Load a signer from a 32-byte raw Ed25519 private seed.
@@ -95,9 +99,10 @@ impl Signer {
         VerifyingKey::from(&self.signing_key).to_bytes()
     }
 
-    /// 32-byte raw Ed25519 private seed. Treat as a secret.
-    pub fn private_key_bytes(&self) -> [u8; 32] {
-        self.signing_key.to_bytes()
+    /// 32-byte raw Ed25519 private seed, wrapped in [`Zeroizing`] so the
+    /// caller's copy is wiped on drop. Treat as a high-value secret.
+    pub fn private_key_bytes(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.signing_key.to_bytes())
     }
 
     /// Create a [`Pin`] for `(source, model, vector)`.
@@ -164,6 +169,8 @@ impl Signer {
         check_string_safe(&ts, "ts")?;
         check_nfc(&ts, "ts")?;
 
+        let vec_dim = u32::try_from(vector.len())
+            .map_err(|_| SignerError::InvalidVector("vec_dim exceeds u32".into()))?;
         let header = PinHeader {
             v: PROTOCOL_VERSION,
             kid: self.key_id.clone(),
@@ -172,7 +179,7 @@ impl Signer {
             source_hash: hash_text(&source_nfc),
             vec_hash: hash_vector(vector, dtype),
             vec_dtype: dtype.as_str().to_owned(),
-            vec_dim: vector.len() as u32,
+            vec_dim,
             ts,
             extra: extra_nfc,
         };
@@ -243,7 +250,7 @@ mod tests {
 
     #[test]
     fn pin_round_trip_basic() {
-        let signer = Signer::generate("test".into());
+        let signer = Signer::generate("test".into()).expect("test signer generate");
         let v: Vec<f32> = vec![1.0, 2.0, 3.0];
         let pin = signer.pin("hello", "model", v.as_slice()).unwrap();
         assert_eq!(pin.kid(), "test");
@@ -267,7 +274,7 @@ mod tests {
 
     #[test]
     fn signer_rejects_nan() {
-        let signer = Signer::generate("k".into());
+        let signer = Signer::generate("k".into()).expect("test signer generate");
         let v: Vec<f32> = vec![1.0, f32::NAN, 3.0];
         let err = signer.pin("x", "m", v.as_slice()).unwrap_err();
         assert!(matches!(err, SignerError::InvalidVector(_)));
@@ -275,7 +282,7 @@ mod tests {
 
     #[test]
     fn signer_rejects_infinity() {
-        let signer = Signer::generate("k".into());
+        let signer = Signer::generate("k".into()).expect("test signer generate");
         let v: Vec<f64> = vec![1.0, f64::INFINITY];
         let err = signer.pin("x", "m", v.as_slice()).unwrap_err();
         assert!(matches!(err, SignerError::InvalidVector(_)));

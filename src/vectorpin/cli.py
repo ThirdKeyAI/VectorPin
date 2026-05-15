@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -30,14 +31,41 @@ if TYPE_CHECKING:
     from vectorpin.adapters.base import PinnedRecord
 
 
+def _write_private_key(path: Path, data: bytes) -> None:
+    """Write a private key with mode 0600 atomically.
+
+    Uses O_EXCL so we never silently clobber an existing key on disk —
+    overwriting key material is almost always a bug, and a fresh keygen
+    against a populated directory should fail loudly.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    try:
+        fd = os.open(str(path), flags, 0o600)
+    except FileExistsError as e:
+        raise FileExistsError(
+            f"refusing to overwrite existing private key at {path}"
+        ) from e
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+
+
 def _cmd_keygen(args: argparse.Namespace) -> int:
     signer = Signer.generate(key_id=args.key_id)
     out = Path(args.output)
-    out.mkdir(parents=True, exist_ok=True)
-    (out / f"{args.key_id}.priv").write_bytes(signer.private_key_bytes())
-    (out / f"{args.key_id}.pub").write_bytes(signer.public_key_bytes())
-    print(f"wrote {out}/{args.key_id}.priv  (KEEP SECRET)", file=sys.stderr)
-    print(f"wrote {out}/{args.key_id}.pub")
+    # mkdir with restrictive mode; if the directory already exists we
+    # leave its mode alone (operator's call) but tighten new dirs.
+    out.mkdir(parents=True, exist_ok=True, mode=0o700)
+    priv_path = out / f"{args.key_id}.priv"
+    pub_path = out / f"{args.key_id}.pub"
+    _write_private_key(priv_path, signer.private_key_bytes())
+    pub_path.write_bytes(signer.public_key_bytes())
+    # Public key is intentionally world-readable, but be explicit so we
+    # don't inherit a surprising umask.
+    os.chmod(pub_path, 0o644)
+    print(f"wrote {priv_path}  (KEEP SECRET)", file=sys.stderr)
+    print(f"wrote {pub_path}")
     return 0
 
 
@@ -90,7 +118,24 @@ def _audit_loop(
     can grep `unpinned` from the JSON summary in CI.
     """
     total = pinned = ok = bad = unpinned = 0
-    for rec in records:
+    # Drive the iterator manually so a malformed record (e.g. a Pin
+    # whose JSON fails strict validation) raises during `next()` and we
+    # can fail-open on that single row instead of aborting the audit.
+    iterator = iter(records)
+    while True:
+        try:
+            rec = next(iterator)
+        except StopIteration:
+            break
+        except (ValueError, json.JSONDecodeError, KeyError) as e:
+            total += 1
+            bad += 1
+            print(
+                f"FAIL <unknown> [parse_error] {e}",
+                file=sys.stderr,
+            )
+            continue
+
         total += 1
         if rec.pin is None:
             unpinned += 1
@@ -108,7 +153,12 @@ def _audit_loop(
                 )
                 continue
             verify_kwargs["source"] = str(src)
-        result = verifier.verify(rec.pin, **verify_kwargs)  # type: ignore[arg-type]
+        try:
+            result = verifier.verify(rec.pin, **verify_kwargs)  # type: ignore[arg-type]
+        except (ValueError, KeyError) as e:
+            bad += 1
+            print(f"FAIL {rec.id} [parse_error] {e}", file=sys.stderr)
+            continue
         if result.ok:
             ok += 1
         else:

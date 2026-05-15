@@ -18,8 +18,10 @@ Install with: pip install 'vectorpin[pinecone]'
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 import numpy as np
 
@@ -28,6 +30,45 @@ from vectorpin.attestation import Pin
 
 if TYPE_CHECKING:
     from pinecone import Index
+
+
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _is_loopback(host: str | None) -> bool:
+    if not host:
+        return False
+    h = host.strip("[]").lower()
+    if h in _LOOPBACK_HOSTS:
+        return True
+    return h.startswith("127.")
+
+
+def _enforce_tls_host(host: str | None, api_key: str | None) -> None:
+    """Refuse plaintext HTTP when an api_key is present.
+
+    Pinecone's `host` may be a bare hostname (recommended) or a full
+    URL. Only the URL form lets us see a scheme; if a scheme is set to
+    http and the host isn't loopback we treat that as misconfiguration.
+    Set VECTORPIN_ALLOW_INSECURE_HTTP=1 to override.
+    """
+    if not host or not api_key:
+        return
+    parsed = urlparse(host)
+    # `urlparse("example.com")` gives scheme="" and netloc="" — nothing
+    # to validate against, fall through.
+    if not parsed.scheme:
+        return
+    if parsed.scheme != "http":
+        return
+    if _is_loopback(parsed.hostname):
+        return
+    if os.environ.get("VECTORPIN_ALLOW_INSECURE_HTTP") == "1":
+        return
+    raise ValueError(
+        "api_key with non-TLS URL refused "
+        "(set VECTORPIN_ALLOW_INSECURE_HTTP=1 if you know what you're doing)"
+    )
 
 
 class PineconeAdapter(BaseAdapter):
@@ -51,7 +92,13 @@ class PineconeAdapter(BaseAdapter):
         `host` is optional but recommended for production: passing
         the dedicated index host skips a control-plane lookup on
         every connection.
+
+        If `host` is provided as a URL with scheme `http://`, we refuse
+        the connection unless the host is loopback. Set the env var
+        `VECTORPIN_ALLOW_INSECURE_HTTP=1` to override; this exists for
+        cases where transport security is enforced out-of-band.
         """
+        _enforce_tls_host(host, api_key)
         try:
             from pinecone import Pinecone
         except ImportError as e:

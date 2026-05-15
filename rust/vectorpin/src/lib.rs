@@ -30,7 +30,7 @@
 //! use vectorpin::{Signer, Verifier};
 //!
 //! // Ingestion: produce an embedding, sign a pin for it.
-//! let signer = Signer::generate("prod-2026-05".to_string());
+//! let signer = Signer::generate("prod-2026-05".to_string()).expect("generate signer");
 //! let embedding: Vec<f32> = vec![0.1, 0.2, 0.3, /* ... */];
 //! let pin = signer
 //!     .pin("The quick brown fox.", "text-embedding-3-large", embedding.as_slice())
@@ -42,7 +42,9 @@
 //! // Read/audit: parse the stored JSON and verify against ground truth.
 //! let parsed = vectorpin::Pin::from_json(&stored).expect("parse pin");
 //! let mut verifier = Verifier::new();
-//! verifier.add_key(signer.key_id(), signer.public_key_bytes());
+//! verifier
+//!     .add_key(signer.key_id(), signer.public_key_bytes())
+//!     .expect("valid pubkey");
 //!
 //! let result = verifier.verify_full(
 //!     &parsed,
@@ -124,6 +126,7 @@
 //! defeat, see the companion preprint at
 //! [10.5281/zenodo.20058256](https://doi.org/10.5281/zenodo.20058256).
 
+#![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
 #![warn(rustdoc::broken_intra_doc_links)]

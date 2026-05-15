@@ -61,7 +61,7 @@ fn bench_hash_vector(c: &mut Criterion) {
 
 fn bench_sign(c: &mut Criterion) {
     let mut group = c.benchmark_group("sign");
-    let signer = Signer::generate("bench".into());
+    let signer = Signer::generate("bench".into()).expect("test signer generate");
     let text = make_text(1024);
     for &d in VECTOR_DIMS {
         let v = make_vector(d);
@@ -83,9 +83,11 @@ fn bench_sign(c: &mut Criterion) {
 
 fn bench_verify(c: &mut Criterion) {
     let mut group = c.benchmark_group("verify_full");
-    let signer = Signer::generate("bench".into());
+    let signer = Signer::generate("bench".into()).expect("test signer generate");
     let mut verifier = Verifier::new();
-    verifier.add_key(signer.key_id(), signer.public_key_bytes());
+    verifier
+        .add_key(signer.key_id(), signer.public_key_bytes())
+        .unwrap();
     let text = make_text(1024);
     for &d in VECTOR_DIMS {
         let v = make_vector(d);
@@ -111,9 +113,11 @@ fn bench_verify(c: &mut Criterion) {
 
 fn bench_verify_signature_only(c: &mut Criterion) {
     let mut group = c.benchmark_group("verify_signature_only");
-    let signer = Signer::generate("bench".into());
+    let signer = Signer::generate("bench".into()).expect("test signer generate");
     let mut verifier = Verifier::new();
-    verifier.add_key(signer.key_id(), signer.public_key_bytes());
+    verifier
+        .add_key(signer.key_id(), signer.public_key_bytes())
+        .unwrap();
     let text = make_text(1024);
     // Signature-only verification cost is independent of the vector
     // body — the dim doesn't enter the canonical header until vector
