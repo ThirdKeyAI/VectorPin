@@ -28,6 +28,7 @@ from vectorpin.adapters.base import PIN_METADATA_KEY, BaseAdapter, PinnedRecord
 if TYPE_CHECKING:
     from vectorpin.adapters.chroma import ChromaAdapter
     from vectorpin.adapters.lancedb import LanceDBAdapter
+    from vectorpin.adapters.pgvector import PgVectorAdapter
     from vectorpin.adapters.pinecone import PineconeAdapter
     from vectorpin.adapters.qdrant import QdrantAdapter
 
@@ -36,6 +37,7 @@ __all__ = [
     "BaseAdapter",
     "ChromaAdapter",
     "LanceDBAdapter",
+    "PgVectorAdapter",
     "PineconeAdapter",
     "PinnedRecord",
     "QdrantAdapter",
@@ -44,6 +46,7 @@ __all__ = [
 _LAZY_ADAPTERS = {
     "ChromaAdapter": ("vectorpin.adapters.chroma", "ChromaAdapter"),
     "LanceDBAdapter": ("vectorpin.adapters.lancedb", "LanceDBAdapter"),
+    "PgVectorAdapter": ("vectorpin.adapters.pgvector", "PgVectorAdapter"),
     "PineconeAdapter": ("vectorpin.adapters.pinecone", "PineconeAdapter"),
     "QdrantAdapter": ("vectorpin.adapters.qdrant", "QdrantAdapter"),
 }

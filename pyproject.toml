@@ -37,6 +37,7 @@ chroma = ["chromadb>=0.5"]
 pinecone = ["pinecone>=5.0"]
 # Note: package was renamed from `pinecone-client` to `pinecone` in 2024.
 qdrant = ["qdrant-client>=1.7"]
+pgvector = ["psycopg[binary]>=3.1", "pgvector>=0.3"]
 faiss = ["faiss-cpu>=1.8"]
 detectors = ["scikit-learn>=1.3"]
 all = [
@@ -44,6 +45,8 @@ all = [
     "chromadb>=0.5",
     "pinecone>=5.0",
     "qdrant-client>=1.7",
+    "psycopg[binary]>=3.1",
+    "pgvector>=0.3",
     "faiss-cpu>=1.8",
     "scikit-learn>=1.3",
 ]
