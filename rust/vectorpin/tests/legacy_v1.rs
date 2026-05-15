@@ -74,10 +74,12 @@ fn default_v2_verifier_rejects_v1_fixtures() {
 
     // Strict v2 verifier must NOT accept v1 — confirms wire-format break.
     let mut verifier = Verifier::new();
-    verifier.add_key(
-        &bundle.key_id,
-        b64(&bundle.public_key_b64).try_into().unwrap(),
-    );
+    verifier
+        .add_key(
+            &bundle.key_id,
+            b64(&bundle.public_key_b64).try_into().unwrap(),
+        )
+        .unwrap();
 
     for fx in &bundle.fixtures {
         // The strict parser rejects v1 pins outright, before reaching

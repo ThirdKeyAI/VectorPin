@@ -166,7 +166,9 @@ fn run_v2_fixture(bundle: &V2Bundle, fx: &V2Fixture) {
     // Round-trip and verify.
     let parsed = Pin::from_json(&pin.to_json()).expect("rust parses its own JSON");
     let mut verifier = Verifier::new();
-    verifier.add_key(&bundle.key_id, signer.public_key_bytes());
+    verifier
+        .add_key(&bundle.key_id, signer.public_key_bytes())
+        .unwrap();
     verifier
         .verify_full::<&[f32]>(&parsed, Some(&fx.input.source), None, None)
         .expect("rust verifies own pin");
@@ -235,6 +237,7 @@ fn classify(err: &VerifyError) -> &'static str {
         VerifyError::CollectionMismatch => "COLLECTION_MISMATCH",
         VerifyError::TenantMismatch => "TENANT_MISMATCH",
         VerifyError::UnsupportedDtype(_) => "PARSE_ERROR",
+        VerifyError::KeyDecodeFailed(_) => "UNKNOWN_KEY",
     }
 }
 
@@ -247,7 +250,7 @@ fn run_negative(bundle: &V2NegativeBundle, fx: &V2NegativeFixture) {
     let pk: [u8; 32] = b64(&bundle.public_key_b64)
         .try_into()
         .expect("public key 32 bytes");
-    verifier.add_key(&bundle.key_id, pk);
+    verifier.add_key(&bundle.key_id, pk).unwrap();
 
     // The pin may fail to parse — that itself is a PARSE_ERROR outcome.
     let parsed = match Pin::from_json(&fx.pin_json) {

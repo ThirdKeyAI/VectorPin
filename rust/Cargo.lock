@@ -656,6 +656,7 @@ dependencies = [
  "sha2",
  "thiserror",
  "unicode-normalization",
+ "zeroize",
 ]
 
 [[package]]

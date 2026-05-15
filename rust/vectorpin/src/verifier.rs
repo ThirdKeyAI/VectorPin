@@ -62,6 +62,10 @@ pub enum VerifyError {
     TenantMismatch,
     /// Pin's `vec_dtype` is not understood by this build.
     UnsupportedDtype(String),
+    /// Public key bytes provided to `add_key` did not decode to a valid
+    /// Edwards point. The registration was refused rather than silently
+    /// dropped, so callers can detect bad key material at setup time.
+    KeyDecodeFailed(String),
 }
 
 impl std::fmt::Display for VerifyError {
@@ -90,6 +94,9 @@ impl std::fmt::Display for VerifyError {
             VerifyError::CollectionMismatch => write!(f, "vectorpin.collection_id mismatch"),
             VerifyError::TenantMismatch => write!(f, "vectorpin.tenant_id mismatch"),
             VerifyError::UnsupportedDtype(s) => write!(f, "unsupported canonical dtype: {s}"),
+            VerifyError::KeyDecodeFailed(kid) => {
+                write!(f, "public key for kid {kid:?} failed to decode")
+            }
         }
     }
 }
@@ -185,10 +192,11 @@ impl Verifier {
     }
 
     /// Register a public key under `kid` with no validity window.
-    pub fn add_key(&mut self, kid: &str, public_key_bytes: [u8; 32]) {
-        if let Ok(vk) = VerifyingKey::from_bytes(&public_key_bytes) {
-            self.keys.insert(kid.to_owned(), KeyEntry::new(vk));
-        }
+    pub fn add_key(&mut self, kid: &str, public_key_bytes: [u8; 32]) -> Result<(), VerifyError> {
+        let vk = VerifyingKey::from_bytes(&public_key_bytes)
+            .map_err(|_| VerifyError::KeyDecodeFailed(kid.to_owned()))?;
+        self.keys.insert(kid.to_owned(), KeyEntry::new(vk));
+        Ok(())
     }
 
     /// Register a fully-specified [`KeyEntry`] under `kid`.
@@ -287,7 +295,8 @@ impl Verifier {
 
         // Step 6: vector check.
         if let Some(vec) = opts.vector {
-            if vec.len() as u32 != pin.header.vec_dim {
+            let supplied_dim = u32::try_from(vec.len()).unwrap_or(u32::MAX);
+            if supplied_dim != pin.header.vec_dim {
                 return Err(VerifyError::ShapeMismatch {
                     supplied: vec.len(),
                     expected: pin.header.vec_dim,
@@ -376,8 +385,8 @@ impl LegacyV1Verifier {
     }
 
     /// Forwarded: register a public key.
-    pub fn add_key(&mut self, kid: &str, public_key_bytes: [u8; 32]) {
-        self.inner.add_key(kid, public_key_bytes);
+    pub fn add_key(&mut self, kid: &str, public_key_bytes: [u8; 32]) -> Result<(), VerifyError> {
+        self.inner.add_key(kid, public_key_bytes)
     }
 
     /// Forwarded: register a [`KeyEntry`] with optional validity window.
@@ -492,9 +501,11 @@ mod tests {
     use crate::signer::Signer;
 
     fn fixture(kid: &str) -> (Signer, Verifier, Vec<f32>) {
-        let signer = Signer::generate(kid.into());
+        let signer = Signer::generate(kid.into()).expect("test signer generate");
         let mut verifier = Verifier::new();
-        verifier.add_key(signer.key_id(), signer.public_key_bytes());
+        verifier
+            .add_key(signer.key_id(), signer.public_key_bytes())
+            .unwrap();
         let v: Vec<f32> = (0..16).map(|i| (i as f32) * 0.1).collect();
         (signer, verifier, v)
     }
@@ -532,12 +543,14 @@ mod tests {
 
     #[test]
     fn unknown_key_is_caught() {
-        let signer = Signer::generate("rogue".into());
+        let signer = Signer::generate("rogue".into()).expect("test signer generate");
         let v: Vec<f32> = vec![1.0, 2.0, 3.0];
         let pin = signer.pin("x", "m", v.as_slice()).unwrap();
-        let other = Signer::generate("prod".into());
+        let other = Signer::generate("prod".into()).expect("test signer generate");
         let mut verifier = Verifier::new();
-        verifier.add_key(other.key_id(), other.public_key_bytes());
+        verifier
+            .add_key(other.key_id(), other.public_key_bytes())
+            .unwrap();
         let err = verifier.verify_signature(&pin).unwrap_err();
         assert!(matches!(err, VerifyError::UnknownKey(_)));
     }
@@ -564,7 +577,7 @@ mod tests {
 
     #[test]
     fn key_expired_lower_bound() {
-        let signer = Signer::generate("k".into());
+        let signer = Signer::generate("k".into()).expect("test signer generate");
         let v: Vec<f32> = vec![1.0, 2.0];
         let pin = signer.pin("x", "m", v.as_slice()).unwrap();
         let pin_unix = parse_v2_ts_unix(&pin.header.ts).unwrap();

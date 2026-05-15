@@ -11,8 +11,10 @@ Install with: pip install 'vectorpin[qdrant]'
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 import numpy as np
 
@@ -21,6 +23,44 @@ from vectorpin.attestation import Pin
 
 if TYPE_CHECKING:
     from qdrant_client import QdrantClient
+
+
+# Hostnames we consider safe to use over plain HTTP with an api_key.
+# Anything else with a real api_key over plaintext leaks the credential.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _is_loopback(host: str | None) -> bool:
+    if not host:
+        return False
+    h = host.strip("[]").lower()
+    if h in _LOOPBACK_HOSTS:
+        return True
+    # 127.0.0.0/8 — common docker-compose / k8s patterns.
+    return h.startswith("127.")
+
+
+def _enforce_tls(url: str, api_key: str | None) -> None:
+    """Refuse to send an api_key over plaintext to a non-loopback host.
+
+    Operators who genuinely need plaintext (e.g. in-cluster traffic over
+    a trusted overlay) can set VECTORPIN_ALLOW_INSECURE_HTTP=1 to opt
+    out. The env-var escape hatch is intentionally environment-scoped
+    so it can't be set accidentally in a single CLI invocation.
+    """
+    if not api_key:
+        return
+    parsed = urlparse(url)
+    if parsed.scheme != "http":
+        return
+    if _is_loopback(parsed.hostname):
+        return
+    if os.environ.get("VECTORPIN_ALLOW_INSECURE_HTTP") == "1":
+        return
+    raise ValueError(
+        "api_key with non-TLS URL refused "
+        "(set VECTORPIN_ALLOW_INSECURE_HTTP=1 if you know what you're doing)"
+    )
 
 
 class QdrantAdapter(BaseAdapter):
@@ -38,7 +78,14 @@ class QdrantAdapter(BaseAdapter):
         *,
         api_key: str | None = None,
     ) -> QdrantAdapter:
-        """Construct an adapter against a remote Qdrant instance."""
+        """Construct an adapter against a remote Qdrant instance.
+
+        If `api_key` is set, the URL must use HTTPS or point at a
+        loopback host; otherwise the credential would travel in cleartext.
+        Set the env var `VECTORPIN_ALLOW_INSECURE_HTTP=1` to override
+        when you have explicit transport-layer protection elsewhere.
+        """
+        _enforce_tls(url, api_key)
         try:
             from qdrant_client import QdrantClient
         except ImportError as e:

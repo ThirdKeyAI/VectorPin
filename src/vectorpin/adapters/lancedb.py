@@ -17,6 +17,7 @@ Install with: pip install 'vectorpin[lancedb]'
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from typing import Any
 
@@ -29,6 +30,37 @@ from vectorpin.attestation import Pin
 # time if your schema uses different names.
 DEFAULT_ID_COLUMN = "id"
 DEFAULT_VECTOR_COLUMN = "vector"
+
+# Column names get inlined into SQL predicates without quoting, so the
+# allow-list has to be airtight. Standard SQL identifier shape only.
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_column_name(col: str, *, field: str = "id_column") -> str:
+    """Reject column names that aren't safe to embed in a SQL predicate.
+
+    LanceDB's `where` clauses are SQL expressions parsed by DataFusion,
+    so a column name with whitespace, quotes, or punctuation could
+    inject syntax. We only accept the standard identifier shape.
+    """
+    if not isinstance(col, str) or not _IDENT_RE.match(col):
+        raise ValueError(f"invalid {field}: {col!r}")
+    return col
+
+
+def _validate_record_id(rid: str) -> str:
+    """Reject record ids with control chars that the SQL escaper won't catch.
+
+    Single-quote escaping handles SQL string literals, but a backslash
+    or embedded NUL/newline can still confuse downstream consumers and
+    log files. Refuse them at the boundary.
+    """
+    if not isinstance(rid, str):
+        raise ValueError(f"record_id must be str; got {type(rid).__name__}")
+    for ch in ("\x00", "\n", "\r", "\\"):
+        if ch in rid:
+            raise ValueError(f"record_id contains forbidden character {ch!r}")
+    return rid
 
 
 class LanceDBAdapter(BaseAdapter):
@@ -53,9 +85,11 @@ class LanceDBAdapter(BaseAdapter):
         pin_column: str = PIN_METADATA_KEY,
     ):
         self._table = table
-        self._id = id_column
-        self._vec = vector_column
-        self._pin = pin_column
+        # Validate every column name we'll ever inline into a SQL
+        # predicate. Cheaper to fail at construction than at query.
+        self._id = _validate_column_name(id_column, field="id_column")
+        self._vec = _validate_column_name(vector_column, field="vector_column")
+        self._pin = _validate_column_name(pin_column, field="pin_column")
 
     @classmethod
     def connect(
@@ -167,7 +201,11 @@ def _id_predicate(column: str, record_id: str) -> str:
 
     Lance's where-clause is a SQL expression evaluated by DataFusion.
     We escape single quotes by doubling them, which is the canonical
-    SQL string-literal escape and what DataFusion expects.
+    SQL string-literal escape and what DataFusion expects. The column
+    name and id are also validated up front against control chars and
+    non-identifier shapes so this string interpolation is safe.
     """
+    _validate_column_name(column, field="id_column")
+    _validate_record_id(record_id)
     escaped = record_id.replace("'", "''")
     return f"{column} = '{escaped}'"

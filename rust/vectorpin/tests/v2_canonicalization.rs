@@ -10,7 +10,7 @@ use vectorpin::{
 };
 
 fn v2_signer(kid: &str) -> Signer {
-    Signer::generate(kid.into())
+    Signer::generate(kid.into()).expect("test signer generate")
 }
 
 fn small_vec() -> Vec<f32> {
@@ -45,7 +45,9 @@ fn kid_is_in_signed_bytes() {
     tampered.header.kid = "kid-b".into();
 
     let mut verifier = Verifier::new();
-    verifier.add_key("kid-b", signer.public_key_bytes());
+    verifier
+        .add_key("kid-b", signer.public_key_bytes())
+        .unwrap();
     let err = verifier.verify_signature(&tampered).unwrap_err();
     assert_eq!(err, VerifyError::SignatureInvalid);
 }
@@ -59,7 +61,7 @@ fn v_is_in_signed_bytes() {
     let mut tampered = pin.clone();
     tampered.header.v = 99;
     let mut verifier = Verifier::new();
-    verifier.add_key("k1", signer.public_key_bytes());
+    verifier.add_key("k1", signer.public_key_bytes()).unwrap();
     let err = verifier.verify_signature(&tampered).unwrap_err();
     // Unsupported version is rejected before reaching signature, but in
     // either case the pin must NOT verify.
@@ -254,7 +256,9 @@ fn verify_nan_vector_rejected_as_parse_error() {
     let pin = signer.pin("x", "m", v.as_slice()).unwrap();
 
     let mut verifier = Verifier::new();
-    verifier.add_key(signer.key_id(), signer.public_key_bytes());
+    verifier
+        .add_key(signer.key_id(), signer.public_key_bytes())
+        .unwrap();
 
     let mut nan_vec = v.clone();
     nan_vec[0] = f32::NAN;
@@ -289,7 +293,9 @@ fn round_trip_with_extra_and_model_hash() {
     assert_eq!(parsed, pin);
 
     let mut verifier = Verifier::new();
-    verifier.add_key(signer.key_id(), signer.public_key_bytes());
+    verifier
+        .add_key(signer.key_id(), signer.public_key_bytes())
+        .unwrap();
     verifier
         .verify(
             &parsed,
