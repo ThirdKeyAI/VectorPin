@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use base64::Engine;
 use serde::Deserialize;
 
-use vectorpin::{KeyEntry, LegacyV1Verifier, Pin, VerifyError, VerifyOptions, Verifier};
+use vectorpin::{KeyEntry, LegacyV1Verifier, Pin, Verifier, VerifyError, VerifyOptions};
 
 fn b64(s: &str) -> Vec<u8> {
     base64::engine::general_purpose::URL_SAFE_NO_PAD

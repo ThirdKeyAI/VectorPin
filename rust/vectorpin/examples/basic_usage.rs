@@ -4,7 +4,7 @@
 //! Mirror of `examples/basic_usage.py` — runs the same scenarios against
 //! the v2 wire format.
 
-use vectorpin::{Pin, Signer, VerifyOptions, Verifier};
+use vectorpin::{Pin, Signer, Verifier, VerifyOptions};
 
 fn main() {
     let embedding: Vec<f32> = (0..128).map(|i| (i as f32) * 0.01).collect();

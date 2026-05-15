@@ -22,7 +22,7 @@ use serde_json::Value;
 
 use vectorpin::{
     hash::{hash_text, hash_vector, VecDtype, VectorRef},
-    KeyEntry, Pin, Signer, VerifyError, VerifyOptions, Verifier,
+    KeyEntry, Pin, Signer, Verifier, VerifyError, VerifyOptions,
 };
 
 // ---- v2 positive fixtures ----------------------------------------------
@@ -117,9 +117,8 @@ fn run_v2_fixture(bundle: &V2Bundle, fx: &V2Fixture) {
     );
 
     // 2. Reproduce the pin from the deterministic seed.
-    let signer =
-        Signer::from_private_bytes(&b64(&bundle.private_key_b64), bundle.key_id.clone())
-            .expect("seed loads");
+    let signer = Signer::from_private_bytes(&b64(&bundle.private_key_b64), bundle.key_id.clone())
+        .expect("seed loads");
     assert_eq!(
         signer.public_key_bytes().to_vec(),
         b64(&bundle.public_key_b64),
@@ -327,8 +326,7 @@ fn cross_language_v2_negative_fixtures() {
     let bundle = V2NegativeBundle {
         public_key_b64: val["public_key_b64"].as_str().unwrap().to_string(),
         key_id: val["key_id"].as_str().unwrap().to_string(),
-        fixtures: serde_json::from_value(val["fixtures"].clone())
-            .expect("parse negative fixtures"),
+        fixtures: serde_json::from_value(val["fixtures"].clone()).expect("parse negative fixtures"),
     };
 
     assert!(!bundle.fixtures.is_empty());
@@ -372,8 +370,8 @@ fn legacy_v1_verifier_accepts_all_v1_fixtures() {
 
     for fx in &bundle.fixtures {
         eprintln!("legacy v1 fixture: {}", fx.name);
-        let pin = vectorpin::LegacyV1Verifier::parse_pin(&fx.expected.pin_json)
-            .expect("parse v1 pin");
+        let pin =
+            vectorpin::LegacyV1Verifier::parse_pin(&fx.expected.pin_json).expect("parse v1 pin");
         verifier
             .verify(&pin, VerifyOptions::default())
             .expect("legacy verifier accepts v1");

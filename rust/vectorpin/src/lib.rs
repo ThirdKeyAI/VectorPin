@@ -137,4 +137,4 @@ pub mod verifier;
 pub use attestation::{AttestationError, Pin, PinHeader, DOMAIN_TAG, PROTOCOL_VERSION};
 pub use hash::{canonical_vector_bytes, hash_text, hash_vector, VecDtype};
 pub use signer::{Signer, SignerError};
-pub use verifier::{KeyEntry, LegacyV1Verifier, VerifyError, VerifyOptions, Verifier};
+pub use verifier::{KeyEntry, LegacyV1Verifier, Verifier, VerifyError, VerifyOptions};

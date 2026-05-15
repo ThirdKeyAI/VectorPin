@@ -99,7 +99,9 @@ impl std::error::Error for VerifyError {}
 impl From<AttestationError> for VerifyError {
     fn from(e: AttestationError) -> Self {
         match e {
-            AttestationError::UnsupportedVersion { got, .. } => VerifyError::UnsupportedVersion(got),
+            AttestationError::UnsupportedVersion { got, .. } => {
+                VerifyError::UnsupportedVersion(got)
+            }
             other => VerifyError::ParseError(other.to_string()),
         }
     }
@@ -322,7 +324,13 @@ impl Verifier {
 
         // Step 8: replay-protection identifier checks.
         if let Some(expected) = opts.expected_record_id {
-            if pin.header.extra.get("vectorpin.record_id").map(|s| s.as_str()) != Some(expected) {
+            if pin
+                .header
+                .extra
+                .get("vectorpin.record_id")
+                .map(|s| s.as_str())
+                != Some(expected)
+            {
                 return Err(VerifyError::RecordMismatch);
             }
         }
@@ -338,7 +346,13 @@ impl Verifier {
             }
         }
         if let Some(expected) = opts.expected_tenant_id {
-            if pin.header.extra.get("vectorpin.tenant_id").map(|s| s.as_str()) != Some(expected) {
+            if pin
+                .header
+                .extra
+                .get("vectorpin.tenant_id")
+                .map(|s| s.as_str())
+                != Some(expected)
+            {
                 return Err(VerifyError::TenantMismatch);
             }
         }
@@ -421,7 +435,11 @@ fn vector_is_finite(v: VectorRef<'_>) -> bool {
 /// to avoid leaking parser-internal errors from the validity-window path).
 fn parse_v2_ts_unix(ts: &str) -> Option<i64> {
     let b = ts.as_bytes();
-    if b.len() != 20 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':'
+    if b.len() != 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
         || b[16] != b':'
         || b[19] != b'Z'
     {

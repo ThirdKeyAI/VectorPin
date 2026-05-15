@@ -6,7 +6,7 @@
 
 use vectorpin::attestation::DOMAIN_TAG;
 use vectorpin::{
-    signer::PinOptions, AttestationError, Pin, Signer, VerifyError, VerifyOptions, Verifier,
+    signer::PinOptions, AttestationError, Pin, Signer, Verifier, VerifyError, VerifyOptions,
 };
 
 fn v2_signer(kid: &str) -> Signer {
@@ -71,10 +71,7 @@ fn signer_rejects_nan_in_vector() {
     let signer = v2_signer("k1");
     let v: Vec<f32> = vec![1.0, f32::NAN, 3.0];
     let err = signer.pin("x", "m", v.as_slice()).unwrap_err();
-    assert!(matches!(
-        err,
-        vectorpin::SignerError::InvalidVector(_)
-    ));
+    assert!(matches!(err, vectorpin::SignerError::InvalidVector(_)));
 }
 
 #[test]
@@ -82,10 +79,7 @@ fn signer_rejects_pos_inf() {
     let signer = v2_signer("k1");
     let v: Vec<f64> = vec![1.0, f64::INFINITY, 3.0];
     let err = signer.pin("x", "m", v.as_slice()).unwrap_err();
-    assert!(matches!(
-        err,
-        vectorpin::SignerError::InvalidVector(_)
-    ));
+    assert!(matches!(err, vectorpin::SignerError::InvalidVector(_)));
 }
 
 #[test]
@@ -123,7 +117,10 @@ fn parser_rejects_control_char_in_string_field() {
     let mut value: serde_json::Value = serde_json::from_str(&pin.to_json()).unwrap();
     value["kid"] = serde_json::Value::String(bad);
     let err = Pin::from_value(value).unwrap_err();
-    assert!(matches!(err, AttestationError::ControlChar(_)), "got {err:?}");
+    assert!(
+        matches!(err, AttestationError::ControlChar(_)),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -135,7 +132,10 @@ fn parser_rejects_bidi_override() {
     let mut value: serde_json::Value = serde_json::from_str(&pin.to_json()).unwrap();
     value["kid"] = serde_json::Value::String(bad);
     let err = Pin::from_value(value).unwrap_err();
-    assert!(matches!(err, AttestationError::BidiOverride(_)), "got {err:?}");
+    assert!(
+        matches!(err, AttestationError::BidiOverride(_)),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -146,7 +146,10 @@ fn parser_rejects_ts_with_fractional_seconds() {
     let mut value: serde_json::Value = serde_json::from_str(&pin.to_json()).unwrap();
     value["ts"] = serde_json::Value::String("2026-05-05T12:00:00.123Z".to_string());
     let err = Pin::from_value(value).unwrap_err();
-    assert!(matches!(err, AttestationError::BadTimestamp(_)), "got {err:?}");
+    assert!(
+        matches!(err, AttestationError::BadTimestamp(_)),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -157,7 +160,10 @@ fn parser_rejects_ts_with_offset() {
     let mut value: serde_json::Value = serde_json::from_str(&pin.to_json()).unwrap();
     value["ts"] = serde_json::Value::String("2026-05-05T12:00:00+00:00".to_string());
     let err = Pin::from_value(value).unwrap_err();
-    assert!(matches!(err, AttestationError::BadTimestamp(_)), "got {err:?}");
+    assert!(
+        matches!(err, AttestationError::BadTimestamp(_)),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -179,21 +185,31 @@ fn parser_rejects_non_string_extra_value() {
     let signer = v2_signer("k");
     let v = small_vec();
     let opts = PinOptions {
-        extra: [("region".to_string(), "us-east".to_string())].into_iter().collect(),
+        extra: [("region".to_string(), "us-east".to_string())]
+            .into_iter()
+            .collect(),
         ..PinOptions::default()
     };
-    let pin = signer.pin_with_options("x", "m", v.as_slice(), opts).unwrap();
+    let pin = signer
+        .pin_with_options("x", "m", v.as_slice(), opts)
+        .unwrap();
     let mut value: serde_json::Value = serde_json::from_str(&pin.to_json()).unwrap();
     value["extra"]["region"] = serde_json::json!(5);
     let err = Pin::from_value(value).unwrap_err();
-    assert!(matches!(err, AttestationError::InvalidField { field: "extra", .. }), "got {err:?}");
+    assert!(
+        matches!(err, AttestationError::InvalidField { field: "extra", .. }),
+        "got {err:?}"
+    );
 }
 
 #[test]
 fn parser_rejects_oversize_pin_json() {
     let oversize = "x".repeat(vectorpin::attestation::MAX_PIN_JSON_BYTES + 1);
     let err = Pin::from_json(&oversize).unwrap_err();
-    assert!(matches!(err, AttestationError::SizeLimit { .. }), "got {err:?}");
+    assert!(
+        matches!(err, AttestationError::SizeLimit { .. }),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -219,7 +235,16 @@ fn parser_rejects_vec_dim_zero() {
     let mut value: serde_json::Value = serde_json::from_str(&pin.to_json()).unwrap();
     value["vec_dim"] = serde_json::json!(0);
     let err = Pin::from_value(value).unwrap_err();
-    assert!(matches!(err, AttestationError::InvalidField { field: "vec_dim", .. }), "got {err:?}");
+    assert!(
+        matches!(
+            err,
+            AttestationError::InvalidField {
+                field: "vec_dim",
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
 }
 
 #[test]

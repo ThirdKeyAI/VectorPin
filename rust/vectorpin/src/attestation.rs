@@ -120,14 +120,8 @@ impl PinHeader {
         // build a Map by inserting in lexicographic order ourselves.
         let mut entries: Vec<(&str, serde_json::Value)> = Vec::new();
         entries.push(("v", serde_json::Value::Number(self.v.into())));
-        entries.push((
-            "kid",
-            serde_json::Value::String(nfc_string(&self.kid)),
-        ));
-        entries.push((
-            "model",
-            serde_json::Value::String(nfc_string(&self.model)),
-        ));
+        entries.push(("kid", serde_json::Value::String(nfc_string(&self.kid))));
+        entries.push(("model", serde_json::Value::String(nfc_string(&self.model))));
         if let Some(h) = &self.model_hash {
             entries.push(("model_hash", serde_json::Value::String(h.clone())));
         }
@@ -135,19 +129,13 @@ impl PinHeader {
             "source_hash",
             serde_json::Value::String(self.source_hash.clone()),
         ));
-        entries.push((
-            "vec_hash",
-            serde_json::Value::String(self.vec_hash.clone()),
-        ));
+        entries.push(("vec_hash", serde_json::Value::String(self.vec_hash.clone())));
         entries.push((
             "vec_dtype",
             serde_json::Value::String(self.vec_dtype.clone()),
         ));
         entries.push(("vec_dim", serde_json::Value::Number(self.vec_dim.into())));
-        entries.push((
-            "ts",
-            serde_json::Value::String(nfc_string(&self.ts)),
-        ));
+        entries.push(("ts", serde_json::Value::String(nfc_string(&self.ts))));
         if !self.extra.is_empty() {
             // NFC each key and value, then re-sort by NFC'd key.
             let mut nfc_entries: Vec<(String, String)> = self
@@ -252,8 +240,7 @@ impl Pin {
                 got: s.len(),
             });
         }
-        let value: serde_json::Value =
-            serde_json::from_str(s).map_err(AttestationError::Json)?;
+        let value: serde_json::Value = serde_json::from_str(s).map_err(AttestationError::Json)?;
         Self::from_value(value)
     }
 
@@ -624,10 +611,7 @@ pub mod legacy_v1 {
     pub fn canonicalize_v1(header: &PinHeader) -> Vec<u8> {
         let mut entries: Vec<(&str, serde_json::Value)> = Vec::new();
         entries.push(("v", serde_json::Value::Number(header.v.into())));
-        entries.push((
-            "model",
-            serde_json::Value::String(header.model.clone()),
-        ));
+        entries.push(("model", serde_json::Value::String(header.model.clone())));
         if let Some(h) = &header.model_hash {
             entries.push(("model_hash", serde_json::Value::String(h.clone())));
         }
@@ -672,8 +656,7 @@ pub mod legacy_v1 {
                 got: s.len(),
             });
         }
-        let value: serde_json::Value =
-            serde_json::from_str(s).map_err(AttestationError::Json)?;
+        let value: serde_json::Value = serde_json::from_str(s).map_err(AttestationError::Json)?;
         parse_v1_value(value)
     }
 
