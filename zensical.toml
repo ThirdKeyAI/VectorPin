@@ -1,0 +1,44 @@
+[project]
+site_name = "VectorPin Documentation"
+site_url = "https://docs.vectorpin.org/"
+site_description = "Verifiable integrity for AI embedding stores"
+repo_url = "https://github.com/ThirdKeyAI/VectorPin"
+repo_name = "ThirdKeyAI/VectorPin"
+nav = [
+  {"Home" = "index.md"},
+  {"Getting Started" = "getting-started.md"},
+  {"Pin Protocol" = "pin-protocol.md"},
+  {"CLI Guide" = "cli-guide.md"},
+  {"Vector Store Adapters" = "adapters.md"},
+  {"Statistical Detectors" = "detectors.md"},
+  {"Deployment" = "deployment.md"},
+  {"Security" = "security.md"},
+  {"Troubleshooting" = "troubleshooting.md"},
+  {"Specification" = "spec.md"},
+  {"thirdkey.ai" = "https://thirdkey.ai"},
+]
+
+[[project.theme.palette]]
+scheme = "default"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+scheme = "slate"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/ThirdKeyAI/VectorPin"
+name = "VectorPin on GitHub"
+
+[[project.extra.social]]
+icon = "fontawesome/solid/globe"
+link = "https://thirdkey.ai"
+name = "ThirdKey"
+
+[[project.extra.social]]
+icon = "fontawesome/solid/shield-halved"
+link = "https://doi.org/10.5281/zenodo.20058256"
+name = "VectorSmuggle preprint"
