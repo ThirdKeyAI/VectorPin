@@ -9,6 +9,7 @@ Subcommands:
   audit-lancedb   Walk a LanceDB table and report on every record's pin.
   audit-chroma    Walk a Chroma collection and report on every record's pin.
   audit-qdrant    Walk a Qdrant collection and report on every record's pin.
+  audit-pgvector  Walk a pgvector-equipped Postgres table and audit every pin.
 
 Run `vectorpin --help` for the canonical usage.
 """
@@ -216,6 +217,27 @@ def _cmd_audit_lancedb(args: argparse.Namespace) -> int:
     )
 
 
+def _cmd_audit_pgvector(args: argparse.Namespace) -> int:
+    from vectorpin.adapters.pgvector import PgVectorAdapter
+
+    public_bytes = Path(args.public_key).read_bytes()
+    verifier = Verifier({args.key_id: public_bytes})
+    adapter = PgVectorAdapter.connect(
+        args.dsn,
+        args.table,
+        id_column=args.id_column,
+        vector_column=args.vector_column,
+        pin_column=args.pin_column,
+    )
+    return _audit_loop(
+        adapter.iter_records(batch_size=args.batch_size),
+        verifier,
+        source_column=None,
+        label_field="table",
+        label_value=args.table,
+    )
+
+
 def _cmd_audit_chroma(args: argparse.Namespace) -> int:
     from vectorpin.adapters.chroma import ChromaAdapter
 
@@ -321,6 +343,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_audit_c.add_argument("--batch-size", type=int, default=256)
     p_audit_c.set_defaults(func=_cmd_audit_chroma)
+
+    p_audit_p = sub.add_parser(
+        "audit-pgvector",
+        help="audit every pin in a pgvector-equipped Postgres table",
+    )
+    p_audit_p.add_argument(
+        "--dsn",
+        required=True,
+        help=(
+            "postgres DSN, e.g. postgresql://user:pass@host:5432/db?sslmode=require. "
+            "Non-loopback hosts require sslmode=require (or stronger) unless "
+            "VECTORPIN_ALLOW_INSECURE_HTTP=1 is set."
+        ),
+    )
+    p_audit_p.add_argument("--table", required=True)
+    p_audit_p.add_argument("--public-key", required=True)
+    p_audit_p.add_argument("--key-id", required=True)
+    p_audit_p.add_argument("--id-column", default="id")
+    p_audit_p.add_argument("--vector-column", default="embedding")
+    p_audit_p.add_argument(
+        "--pin-column",
+        default="vectorpin",
+        help="JSONB or TEXT column holding the pin payload (default: vectorpin)",
+    )
+    p_audit_p.add_argument("--batch-size", type=int, default=256)
+    p_audit_p.set_defaults(func=_cmd_audit_pgvector)
 
     return parser
 
