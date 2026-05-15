@@ -5,6 +5,54 @@ All notable changes to VectorPin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-05-15
+
+Promotes 0.2.0-rc.1 to a stable release with one additive change since
+the release candidate: a new pgvector adapter and `audit-pgvector` CLI
+command. No wire-format changes from rc.1; pins produced by rc.1
+verify on 0.2.0 and vice-versa.
+
+### Added
+
+- `PgVectorAdapter` (`vectorpin.adapters.pgvector`) — reads and writes
+  pins on a pgvector-equipped Postgres table. Same shape as
+  `QdrantAdapter` / `LanceDBAdapter`: `iter_records`, `get`,
+  `attach_pin`, classmethod `connect(dsn, table, *, id_column='id',
+  vector_column='embedding', pin_column='vectorpin')`.
+- `audit-pgvector` CLI subcommand mirroring `audit-{lancedb,chroma,
+  qdrant}`.
+- `vectorpin[pgvector]` optional extra (`psycopg[binary]>=3.1` +
+  `pgvector>=0.3`).
+- `scripts/pinecone_live_e2e.py` — self-contained manual verification
+  script that creates a fresh Pinecone serverless index, runs the
+  full sign-attach-verify round-trip via `PineconeAdapter`, exercises
+  tamper rejection, and deletes the index on exit. Verified against
+  live Pinecone (AWS us-east-1).
+- 22 new tests (`tests/test_adapter_pgvector.py`): 14 offline TLS-guard
+  / identifier-validation tests + 8 live integration tests that
+  auto-discover the compose service via
+  `VECTORPIN_TEST_PGVECTOR_URL` / `PGVECTOR_URL` env vars and skip
+  cleanly otherwise.
+
+### Hardening
+
+- pgvector adapter applies the same security guards as the other
+  remote-DB adapters: refuses plaintext postgres DSNs to non-loopback
+  hosts without `sslmode=require` (or stronger), with the
+  `VECTORPIN_ALLOW_INSECURE_HTTP=1` env-scoped escape hatch.
+- SQL identifier validation (`^[A-Za-z_][A-Za-z0-9_]*$`) on every
+  interpolated name (table, id column, vector column, pin column),
+  matching the LanceDB adapter's contract. Postgres has no
+  parameterized form for identifiers, so this is the only line of
+  defense against shell-style injection in those parameters.
+
+### Notes
+
+The pgvector adapter accepts both JSONB and TEXT pin columns — JSONB
+returns a decoded `dict` (parsed via `Pin.from_dict`), TEXT returns a
+`str` (parsed via `Pin.from_json`). Both routes go through the strict
+v2 schema validation.
+
 ## [0.2.0-rc.1] — 2026-05-14
 
 Release candidate for 0.2.0. **This is a wire-format break.** Pins
