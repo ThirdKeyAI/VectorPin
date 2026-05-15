@@ -6,7 +6,8 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Rust stable](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
 [![Node 20+](https://img.shields.io/badge/node-20+-green.svg)](https://nodejs.org/)
-[![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status)
+[![Status: beta](https://img.shields.io/badge/status-beta-yellow.svg)](#status)
+[![arXiv](https://img.shields.io/badge/arXiv-2605.13764-b31b1b.svg)](https://arxiv.org/abs/2605.13764)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20058256.svg)](https://doi.org/10.5281/zenodo.20058256)
 
 Vector databases are the new soft underbelly of the AI stack. Models trust them. Agents query them. Compliance audits don't yet ask about them. VectorPin pins every embedding to its source content and the model that produced it, then continuously verifies the store has not been tampered with — including covert steganographic modifications invisible to traditional DLP.
@@ -282,22 +283,24 @@ The protocol version field (`v: 1`) lets future revisions break compatibility cl
 
 If you reference VectorPin or the threat model it defends against, please cite the companion preprint:
 
-> Wanger, J. (2026). *VectorSmuggle: Steganographic Exfiltration in Embedding Stores and a Cryptographic Provenance Defense*. Zenodo. <https://doi.org/10.5281/zenodo.20058256>
+> Wanger, J. (2026). *VectorSmuggle: Steganographic Exfiltration in Embedding Stores and a Cryptographic Provenance Defense*. arXiv:2605.13764. <https://arxiv.org/abs/2605.13764> ([PDF](https://arxiv.org/pdf/2605.13764)) · Zenodo mirror: <https://doi.org/10.5281/zenodo.20058256>
 
 ```bibtex
 @misc{wanger2026vectorsmuggle,
   title  = {{VectorSmuggle}: Steganographic Exfiltration in Embedding Stores and a Cryptographic Provenance Defense},
   author = {Wanger, Jascha},
   year   = {2026},
-  publisher = {Zenodo},
+  eprint = {2605.13764},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.CR},
   doi    = {10.5281/zenodo.20058256},
-  url    = {https://doi.org/10.5281/zenodo.20058256}
+  url    = {https://arxiv.org/abs/2605.13764}
 }
 ```
 
 ## Related work
 
-- [VectorSmuggle](https://github.com/jaschadub/VectorSmuggle) — companion threat-research project demonstrating the attacks VectorPin defends against. Empirical results in the linked Zenodo preprint.
+- [VectorSmuggle](https://github.com/jaschadub/VectorSmuggle) — companion threat-research project demonstrating the attacks VectorPin defends against. Empirical results in the [arXiv preprint](https://arxiv.org/abs/2605.13764).
 - [Symbiont](https://github.com/ThirdKeyAI/Symbiont) — policy-governed agent runtime; consumes VectorPin attestations to enforce "agents may only retrieve from verified vector stores."
 - [SchemaPin](https://github.com/ThirdKeyAI/SchemaPin) — sister project doing the same kind of cryptographic provenance for tool schemas in MCP.
 - [sigstore](https://www.sigstore.dev/) — inspired our approach to OSS-friendly cryptographic provenance.
