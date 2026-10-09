@@ -26,9 +26,8 @@ pub const PROTOCOL_VERSION: u32 = 2;
 /// Domain separator prepended to canonical JSON before signing.
 ///
 /// Exactly 13 bytes: ASCII `"vectorpin/v2"` (12 bytes) plus one trailing
-/// NUL. The spec text describes this string as "14 bytes" in §2 and §4.2
-/// — that is a known typo; the byte literal is the contract. Cross-
-/// language ports MUST match these bytes.
+/// NUL. The byte literal is the contract; cross-language ports MUST
+/// match these bytes.
 pub const DOMAIN_TAG: &[u8] = b"vectorpin/v2\x00";
 
 // Compile-time sanity check: any edit that resizes the tag fails the build.
@@ -48,6 +47,12 @@ pub const MAX_EXTRA_VALUE_BYTES: usize = 1024;
 pub const MAX_VEC_DIM: u32 = 1_048_576;
 /// Exact length of an Ed25519 signature in bytes.
 pub const SIG_LEN: usize = 64;
+/// Maximum UTF-8 byte length of `kid` (§4.3). Checked before NFC and
+/// control-character scans so a hostile [`Pin::from_value`] input cannot
+/// push an arbitrarily large string through those passes.
+pub const MAX_KID_BYTES: usize = 256;
+/// Maximum UTF-8 byte length of `model` (§4.3).
+pub const MAX_MODEL_BYTES: usize = 1024;
 
 /// Set of permitted top-level keys in a v2 pin (§4.1). Any other key
 /// rejects at parse time.
@@ -324,33 +329,86 @@ fn is_valid_hash_string(s: &str) -> bool {
     hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// Timestamp regex: `YYYY-MM-DDTHH:MM:SSZ`, exactly.
-fn is_valid_ts(s: &str) -> bool {
+/// Broken-down UTC timestamp fields of a validated v2 `ts` string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TsParts {
+    pub year: i64,
+    pub month: u32,
+    pub day: u32,
+    pub hour: u32,
+    pub minute: u32,
+    pub second: u32,
+}
+
+/// Parse and validate a v2 `ts` string: `YYYY-MM-DDTHH:MM:SSZ`, exactly,
+/// AND a real proleptic-Gregorian UTC instant (month 01-12, day valid
+/// for the month with leap years honored, hour 00-23, minute 00-59,
+/// second 00-59). The regex shape alone admits `2026-13-00`, which a
+/// date-arithmetic routine would silently roll into a different real
+/// date — or underflow on. Returns `None` on any violation.
+pub(crate) fn parse_ts(s: &str) -> Option<TsParts> {
     let b = s.as_bytes();
-    if b.len() != 20 {
-        return false;
+    if b.len() != 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+        || b[19] != b'Z'
+    {
+        return None;
     }
-    let dig = |i: usize| b[i].is_ascii_digit();
-    dig(0)
-        && dig(1)
-        && dig(2)
-        && dig(3)
-        && b[4] == b'-'
-        && dig(5)
-        && dig(6)
-        && b[7] == b'-'
-        && dig(8)
-        && dig(9)
-        && b[10] == b'T'
-        && dig(11)
-        && dig(12)
-        && b[13] == b':'
-        && dig(14)
-        && dig(15)
-        && b[16] == b':'
-        && dig(17)
-        && dig(18)
-        && b[19] == b'Z'
+    let num = |from: usize, to: usize| -> Option<u32> {
+        let mut acc: u32 = 0;
+        for &c in &b[from..to] {
+            if !c.is_ascii_digit() {
+                return None;
+            }
+            acc = acc.checked_mul(10)?.checked_add(u32::from(c - b'0'))?;
+        }
+        Some(acc)
+    };
+    let year = num(0, 4)?;
+    let month = num(5, 7)?;
+    let day = num(8, 10)?;
+    let hour = num(11, 13)?;
+    let minute = num(14, 16)?;
+    let second = num(17, 19)?;
+    if !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
+        return None;
+    }
+    if hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    Some(TsParts {
+        year: i64::from(year),
+        month,
+        day,
+        hour,
+        minute,
+        second,
+    })
+}
+
+fn days_in_month(year: u32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// Timestamp validity: strict shape plus calendar validity (`parse_ts`).
+fn is_valid_ts(s: &str) -> bool {
+    parse_ts(s).is_some()
 }
 
 /// Reject control chars (U+0000-U+001F) and bidi overrides
@@ -403,15 +461,7 @@ fn parse_pin_strict(
     }
 
     // 2. Version check.
-    let v_raw = obj
-        .get("v")
-        .ok_or(AttestationError::MissingField("v"))?
-        .as_u64()
-        .ok_or(AttestationError::InvalidField {
-            field: "v",
-            detail: "must be an unsigned integer".into(),
-        })?;
-    let v = v_raw as u32;
+    let v = version_field(&obj)?;
     if v != expected_version {
         return Err(AttestationError::UnsupportedVersion {
             got: v,
@@ -419,12 +469,16 @@ fn parse_pin_strict(
         });
     }
 
-    // 3. String fields with NFC + control-char + bidi checks.
+    // 3. String fields: byte cap first (§4.3), then NFC + control-char +
+    //    bidi checks. serde_json has already rejected lone surrogates,
+    //    which a Rust `String` cannot hold.
     let kid = string_field(&obj, "kid")?;
+    check_byte_cap(&kid, MAX_KID_BYTES, "kid")?;
     check_string_safe(&kid, "kid")?;
     check_nfc(&kid, "kid")?;
 
     let model = string_field(&obj, "model")?;
+    check_byte_cap(&model, MAX_MODEL_BYTES, "model")?;
     check_string_safe(&model, "model")?;
     check_nfc(&model, "model")?;
 
@@ -500,9 +554,10 @@ fn parse_pin_strict(
     }
     let vec_dim = vec_dim_u64 as u32;
 
-    // 6. extra: map<string, string>, bounded.
+    // 6. extra: map<string, string>, bounded. `null` is not "absent"
+    //    (§4.1): the field is either an object or not present at all.
     let extra = match obj.get("extra") {
-        None | Some(serde_json::Value::Null) => BTreeMap::new(),
+        None => BTreeMap::new(),
         Some(serde_json::Value::Object(m)) => {
             if m.len() > MAX_EXTRA_ENTRIES {
                 return Err(AttestationError::SizeLimit {
@@ -544,8 +599,14 @@ fn parse_pin_strict(
         }
     };
 
-    // 7. Signature: base64, exactly 64 bytes.
+    // 7. Signature: canonical base64url without padding, exactly 64 bytes.
     let sig_str = string_field(&obj, "sig")?;
+    if sig_str.len() > 4 * SIG_LEN {
+        return Err(AttestationError::SizeLimit {
+            limit: 4 * SIG_LEN,
+            got: sig_str.len(),
+        });
+    }
     let sig = b64url_decode(&sig_str)?;
     if sig.len() != SIG_LEN {
         return Err(AttestationError::InvalidField {
@@ -569,6 +630,39 @@ fn parse_pin_strict(
         },
         sig,
     })
+}
+
+/// Parse `v` as a JSON integer that fits a `u32`. `2.0`, `true`,
+/// negative numbers and anything above `u32::MAX` are rejected rather
+/// than truncated (`4294967298 as u32` would read as `2`).
+fn version_field(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Result<u32, AttestationError> {
+    let raw = obj.get("v").ok_or(AttestationError::MissingField("v"))?;
+    let v_u64 = raw.as_u64().ok_or(AttestationError::InvalidField {
+        field: "v",
+        detail: "must be an unsigned integer".into(),
+    })?;
+    u32::try_from(v_u64).map_err(|_| AttestationError::InvalidField {
+        field: "v",
+        detail: "exceeds u32 range".into(),
+    })
+}
+
+/// Reject a string whose UTF-8 length exceeds `limit` bytes.
+pub(crate) fn check_byte_cap(
+    value: &str,
+    limit: usize,
+    field: &'static str,
+) -> Result<(), AttestationError> {
+    if value.len() > limit {
+        return Err(AttestationError::SizeLimit {
+            limit,
+            got: value.len(),
+        });
+    }
+    let _ = field;
+    Ok(())
 }
 
 fn string_field(
@@ -671,15 +765,7 @@ pub mod legacy_v1 {
             }
         };
 
-        let v_raw = obj
-            .get("v")
-            .ok_or(AttestationError::MissingField("v"))?
-            .as_u64()
-            .ok_or(AttestationError::InvalidField {
-                field: "v",
-                detail: "must be an unsigned integer".into(),
-            })?;
-        let v = v_raw as u32;
+        let v = version_field(&obj)?;
         if v != V1_PROTOCOL_VERSION {
             return Err(AttestationError::UnsupportedVersion {
                 got: v,
@@ -687,17 +773,21 @@ pub mod legacy_v1 {
             });
         }
 
-        // v1: minimal validation. Pull each field by name, accept what's there.
+        // v1: minimal validation. Pull each field by name, accept what's
+        // there — but still apply the §4.3 byte caps so a hostile v1 pin
+        // cannot smuggle a multi-megabyte string past the parser.
         let model = obj
             .get("model")
             .and_then(|x| x.as_str())
             .ok_or(AttestationError::MissingField("model"))?
             .to_owned();
+        check_byte_cap(&model, MAX_MODEL_BYTES, "model")?;
         let kid = obj
             .get("kid")
             .and_then(|x| x.as_str())
             .ok_or(AttestationError::MissingField("kid"))?
             .to_owned();
+        check_byte_cap(&kid, MAX_KID_BYTES, "kid")?;
         let source_hash = obj
             .get("source_hash")
             .and_then(|x| x.as_str())
@@ -713,10 +803,17 @@ pub mod legacy_v1 {
             .and_then(|x| x.as_str())
             .ok_or(AttestationError::MissingField("vec_dtype"))?
             .to_owned();
-        let vec_dim = obj
+        let vec_dim_u64 = obj
             .get("vec_dim")
             .and_then(|x| x.as_u64())
-            .ok_or(AttestationError::MissingField("vec_dim"))? as u32;
+            .ok_or(AttestationError::MissingField("vec_dim"))?;
+        if vec_dim_u64 == 0 || vec_dim_u64 > MAX_VEC_DIM as u64 {
+            return Err(AttestationError::InvalidField {
+                field: "vec_dim",
+                detail: format!("must be in (0, {MAX_VEC_DIM}]; got {vec_dim_u64}"),
+            });
+        }
+        let vec_dim = vec_dim_u64 as u32;
         let ts = obj
             .get("ts")
             .and_then(|x| x.as_str())
@@ -808,5 +905,30 @@ mod tests {
     fn canonicalize_is_deterministic() {
         let h = header();
         assert_eq!(h.canonicalize(), h.canonicalize());
+    }
+
+    #[test]
+    fn ts_parser_enforces_calendar_validity() {
+        for bad in [
+            "2026-03-00T00:00:00Z",
+            "2026-13-01T00:00:00Z",
+            "2026-00-10T00:00:00Z",
+            "2026-02-30T00:00:00Z",
+            "2025-02-29T00:00:00Z",
+            "2026-04-31T00:00:00Z",
+            "2026-05-05T24:00:00Z",
+            "2026-05-05T12:60:00Z",
+            "2026-05-05T12:00:60Z",
+            "2026-05-05T12:00:00.0Z",
+        ] {
+            assert!(parse_ts(bad).is_none(), "{bad} must be rejected");
+        }
+        for good in [
+            "2024-02-29T23:59:59Z",
+            "2026-12-31T00:00:00Z",
+            "0000-01-01T00:00:00Z",
+        ] {
+            assert!(parse_ts(good).is_some(), "{good} must parse");
+        }
     }
 }

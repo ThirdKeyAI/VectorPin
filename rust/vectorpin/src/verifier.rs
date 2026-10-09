@@ -18,7 +18,7 @@ use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 
 use crate::attestation::{
     legacy_v1::{canonicalize_v1, parse_v1_pin, V1_PROTOCOL_VERSION},
-    AttestationError, Pin, PROTOCOL_VERSION,
+    parse_ts, AttestationError, Pin, PROTOCOL_VERSION,
 };
 use crate::hash::{hash_text, hash_vector, VecDtype, VectorRef};
 
@@ -53,6 +53,18 @@ pub enum VerifyError {
         supplied: usize,
         /// `vec_dim` from the pin header.
         expected: u32,
+    },
+    /// Supplied vector is wider than the pin's `vec_dtype` (§3.2).
+    ///
+    /// Casting a wider vector down before hashing would leave every bit
+    /// the cast discards unverified, so an `f64` slice can never be
+    /// checked against an `f32` pin. The Python and TypeScript ports
+    /// report this case as `SHAPE_MISMATCH`.
+    PrecisionWidening {
+        /// Native dtype of the supplied slice.
+        supplied: VecDtype,
+        /// `vec_dtype` from the pin header.
+        pinned: VecDtype,
     },
     /// Caller's expected `vectorpin.record_id` did not match the pin.
     RecordMismatch,
@@ -90,6 +102,13 @@ impl std::fmt::Display for VerifyError {
                 f,
                 "vector shape mismatch: supplied len {supplied}, pin dim {expected}"
             ),
+            VerifyError::PrecisionWidening { supplied, pinned } => write!(
+                f,
+                "supplied vector dtype {} is wider than pinned vec_dtype {}; low-order bits \
+                 would be unverified (pin under the dtype your store persists)",
+                supplied.as_str(),
+                pinned.as_str()
+            ),
             VerifyError::RecordMismatch => write!(f, "vectorpin.record_id mismatch"),
             VerifyError::CollectionMismatch => write!(f, "vectorpin.collection_id mismatch"),
             VerifyError::TenantMismatch => write!(f, "vectorpin.tenant_id mismatch"),
@@ -118,6 +137,11 @@ impl From<AttestationError> for VerifyError {
 ///
 /// `valid_from` is inclusive, `valid_until` is exclusive. If both are
 /// `None`, the key validates pins of any timestamp.
+///
+/// The window is evaluated against the pin's signer-chosen `ts` unless
+/// the caller supplies [`VerifyOptions::trusted_time`]; on its own it
+/// therefore only bounds *honest* signers — a holder of a compromised
+/// key can backdate `ts` into the window.
 #[derive(Debug, Clone)]
 pub struct KeyEntry {
     /// 32-byte Ed25519 public key.
@@ -169,12 +193,21 @@ pub struct VerifyOptions<'a> {
     pub vector: Option<VectorRef<'a>>,
     /// Expected model identifier.
     pub expected_model: Option<&'a str>,
+    /// Expected `model_hash` (`sha256:<hex>`). A pin without one fails
+    /// [`VerifyError::ModelMismatch`] when this is set.
+    pub expected_model_hash: Option<&'a str>,
     /// Expected `vectorpin.record_id` in `extra`.
     pub expected_record_id: Option<&'a str>,
     /// Expected `vectorpin.collection_id` in `extra`.
     pub expected_collection_id: Option<&'a str>,
     /// Expected `vectorpin.tenant_id` in `extra`.
     pub expected_tenant_id: Option<&'a str>,
+    /// An instant (UNIX seconds, UTC) from a clock the signing-key holder
+    /// cannot write — typically the store's own ingestion timestamp.
+    /// When set, the key validity window is evaluated against it instead
+    /// of the pin's `ts`, and a pin whose `ts` postdates it is rejected
+    /// as [`VerifyError::KeyExpired`].
+    pub trusted_time: Option<i64>,
 }
 
 /// Holds the public-key registry and runs pin verification against
@@ -266,15 +299,28 @@ impl Verifier {
             .get(&pin.header.kid)
             .ok_or_else(|| VerifyError::UnknownKey(pin.header.kid.clone()))?;
 
-        if entry.valid_from.is_some() || entry.valid_until.is_some() {
+        if entry.valid_from.is_some() || entry.valid_until.is_some() || opts.trusted_time.is_some()
+        {
             let pin_ts = parse_v2_ts_unix(&pin.header.ts).ok_or(VerifyError::KeyExpired)?;
+            // `ts` is chosen by whoever holds the signing key; a trusted
+            // time from the store binds the window to a clock the key
+            // holder cannot write.
+            let window_ts = match opts.trusted_time {
+                Some(trusted) => {
+                    if pin_ts > trusted {
+                        return Err(VerifyError::KeyExpired);
+                    }
+                    trusted
+                }
+                None => pin_ts,
+            };
             if let Some(vf) = entry.valid_from {
-                if pin_ts < vf {
+                if window_ts < vf {
                     return Err(VerifyError::KeyExpired);
                 }
             }
             if let Some(vu) = entry.valid_until {
-                if pin_ts >= vu {
+                if window_ts >= vu {
                     return Err(VerifyError::KeyExpired);
                 }
             }
@@ -293,6 +339,13 @@ impl Verifier {
             .verify(&canonical, &signature)
             .map_err(|_| VerifyError::SignatureInvalid)?;
 
+        // Step 5: source check.
+        if let Some(s) = opts.source {
+            if hash_text(s) != pin.header.source_hash {
+                return Err(VerifyError::SourceMismatch);
+            }
+        }
+
         // Step 6: vector check.
         if let Some(vec) = opts.vector {
             let supplied_dim = u32::try_from(vec.len()).unwrap_or(u32::MAX);
@@ -302,22 +355,23 @@ impl Verifier {
                     expected: pin.header.vec_dim,
                 });
             }
+            let dtype = VecDtype::parse(&pin.header.vec_dtype)
+                .map_err(|_| VerifyError::UnsupportedDtype(pin.header.vec_dtype.clone()))?;
+            // Precision check (§3.2): never narrow a wider vector before
+            // hashing — the discarded bits would be a covert channel.
+            if matches!((vec, dtype), (VectorRef::F64(_), VecDtype::F32)) {
+                return Err(VerifyError::PrecisionWidening {
+                    supplied: vec.native_dtype(),
+                    pinned: dtype,
+                });
+            }
             if !vector_is_finite(vec) {
                 return Err(VerifyError::ParseError(
                     "supplied vector contains NaN or infinity".into(),
                 ));
             }
-            let dtype = VecDtype::parse(&pin.header.vec_dtype)
-                .map_err(|_| VerifyError::UnsupportedDtype(pin.header.vec_dtype.clone()))?;
             if hash_vector(vec, dtype) != pin.header.vec_hash {
                 return Err(VerifyError::VectorTampered);
-            }
-        }
-
-        // Step 5: source check.
-        if let Some(s) = opts.source {
-            if hash_text(s) != pin.header.source_hash {
-                return Err(VerifyError::SourceMismatch);
             }
         }
 
@@ -327,6 +381,14 @@ impl Verifier {
                 return Err(VerifyError::ModelMismatch {
                     pin_model: pin.header.model.clone(),
                     expected: em.to_owned(),
+                });
+            }
+        }
+        if let Some(emh) = opts.expected_model_hash {
+            if pin.header.model_hash.as_deref() != Some(emh) {
+                return Err(VerifyError::ModelMismatch {
+                    pin_model: pin.header.model.clone(),
+                    expected: format!("model_hash {emh}"),
                 });
             }
         }
@@ -408,8 +470,8 @@ impl LegacyV1Verifier {
         let v = value
             .get("v")
             .and_then(|x| x.as_u64())
-            .ok_or_else(|| VerifyError::ParseError("missing `v` field".into()))?
-            as u32;
+            .and_then(|x| u32::try_from(x).ok())
+            .ok_or_else(|| VerifyError::ParseError("missing or out-of-range `v` field".into()))?;
         if v == V1_PROTOCOL_VERSION {
             parse_v1_pin(s).map_err(VerifyError::from)
         } else {
@@ -439,60 +501,44 @@ fn vector_is_finite(v: VectorRef<'_>) -> bool {
     }
 }
 
-/// Parse a v2-format `ts` string to UNIX epoch seconds. Returns `None`
-/// on any format violation (callers map this to [`VerifyError::KeyExpired`]
-/// to avoid leaking parser-internal errors from the validity-window path).
-fn parse_v2_ts_unix(ts: &str) -> Option<i64> {
-    let b = ts.as_bytes();
-    if b.len() != 20
-        || b[4] != b'-'
-        || b[7] != b'-'
-        || b[10] != b'T'
-        || b[13] != b':'
-        || b[16] != b':'
-        || b[19] != b'Z'
-    {
-        return None;
-    }
-    let n2 = |i: usize| -> Option<i64> {
-        let a = b[i];
-        let c = b[i + 1];
-        if a.is_ascii_digit() && c.is_ascii_digit() {
-            Some(((a - b'0') * 10 + (c - b'0')) as i64)
-        } else {
-            None
-        }
-    };
-    let n4 = |i: usize| -> Option<i64> {
-        let mut acc = 0i64;
-        for j in 0..4 {
-            let c = b[i + j];
-            if !c.is_ascii_digit() {
-                return None;
-            }
-            acc = acc * 10 + (c - b'0') as i64;
-        }
-        Some(acc)
-    };
-    let year = n4(0)? as i32;
-    let month = n2(5)? as u32;
-    let day = n2(8)? as u32;
-    let hour = n2(11)? as u32;
-    let minute = n2(14)? as u32;
-    let second = n2(17)? as u32;
-    Some(civil_to_unix(year, month, day, hour, minute, second))
+/// Convert a v2-format `ts` string (`YYYY-MM-DDTHH:MM:SSZ`) to UNIX epoch
+/// seconds, for building [`KeyEntry`] validity windows and
+/// [`VerifyOptions::trusted_time`] values. Returns `None` on any format
+/// or calendar violation.
+pub fn parse_ts_unix(ts: &str) -> Option<i64> {
+    parse_v2_ts_unix(ts)
 }
 
-fn civil_to_unix(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> i64 {
-    // Inverse of unix_to_ymdhms (Howard Hinnant).
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = (y - era * 400) as u32;
-    let m_u = m as i32;
-    let doy = (153 * (if m_u > 2 { m_u - 3 } else { m_u + 9 }) as u32 + 2) / 5 + d - 1;
+/// Parse a v2-format `ts` string to UNIX epoch seconds. Returns `None`
+/// on any format or calendar violation (callers map this to
+/// [`VerifyError::KeyExpired`] to avoid leaking parser-internal errors
+/// from the validity-window path). All arithmetic is checked `i64`, so
+/// no input can panic or wrap.
+fn parse_v2_ts_unix(ts: &str) -> Option<i64> {
+    let t = parse_ts(ts)?;
+    civil_to_unix(t.year, t.month, t.day, t.hour, t.minute, t.second)
+}
+
+fn civil_to_unix(y: i64, m: u32, d: u32, h: u32, mi: u32, s: u32) -> Option<i64> {
+    // Inverse of unix_to_ymdhms (Howard Hinnant). `m` is 1..=12 and `d`
+    // is a valid day for the month by the time we get here, but every
+    // step stays checked regardless.
+    let m = i64::from(m);
+    let d = i64::from(d);
+    let y = if m <= 2 { y.checked_sub(1)? } else { y };
+    let era = if y >= 0 { y } else { y.checked_sub(399)? }.div_euclid(400);
+    let yoe = y.checked_sub(era.checked_mul(400)?)?;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d.checked_sub(1)?;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era as i64 * 146097 + doe as i64 - 719468;
-    days * 86400 + (h as i64) * 3600 + (mi as i64) * 60 + (s as i64)
+    let days = era
+        .checked_mul(146_097)?
+        .checked_add(doe)?
+        .checked_sub(719_468)?;
+    days.checked_mul(86_400)?
+        .checked_add(i64::from(h) * 3_600)?
+        .checked_add(i64::from(mi) * 60)?
+        .checked_add(i64::from(s))
 }
 
 #[cfg(test)]
@@ -573,6 +619,26 @@ mod tests {
         // 2026-05-05T12:00:00Z = 1777982400 (verified via Python
         // `datetime(...).timestamp()` against UTC).
         assert_eq!(unix, 1_777_982_400);
+        // Epoch and a leap day.
+        assert_eq!(parse_v2_ts_unix("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(
+            parse_v2_ts_unix("2024-02-29T00:00:00Z"),
+            Some(1_709_164_800)
+        );
+    }
+
+    #[test]
+    fn invalid_calendar_ts_never_panics_and_is_rejected() {
+        // `2026-03-00` used to reach `0u32 - 1` in day-of-year arithmetic
+        // (a panic with overflow checks, a wrapped date without).
+        for bad in [
+            "2026-03-00T00:00:00Z",
+            "2026-13-00T00:00:00Z",
+            "2026-00-00T00:00:00Z",
+            "2026-02-30T00:00:00Z",
+        ] {
+            assert_eq!(parse_v2_ts_unix(bad), None, "{bad}");
+        }
     }
 
     #[test]
