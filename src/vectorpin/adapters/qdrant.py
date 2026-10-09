@@ -18,7 +18,13 @@ from urllib.parse import urlparse
 
 import numpy as np
 
-from vectorpin.adapters.base import PIN_METADATA_KEY, BaseAdapter, PinnedRecord
+from vectorpin.adapters.base import (
+    PIN_METADATA_KEY,
+    BaseAdapter,
+    PinnedRecord,
+    parse_pin_field,
+    vector_from_store,
+)
 from vectorpin.attestation import Pin
 
 if TYPE_CHECKING:
@@ -66,9 +72,24 @@ def _enforce_tls(url: str, api_key: str | None) -> None:
 class QdrantAdapter(BaseAdapter):
     """Wraps a Qdrant collection for VectorPin reads and writes."""
 
-    def __init__(self, client: QdrantClient, collection_name: str):
+    def __init__(
+        self,
+        client: QdrantClient,
+        collection_name: str,
+        *,
+        vector_dtype: Any = np.float32,
+    ):
+        """Wrap a Qdrant collection.
+
+        ``vector_dtype`` is the element type the collection persists.
+        Qdrant stores ``float32`` unless the collection was created with
+        a different ``datatype`` (``float16`` / ``uint8``); the REST and
+        gRPC transports always deliver Python floats, so the persisted
+        width must be declared here rather than inferred from the wire.
+        """
         self._client = client
         self._collection = collection_name
+        self._vector_dtype = np.dtype(vector_dtype)
 
     @classmethod
     def connect(
@@ -77,6 +98,7 @@ class QdrantAdapter(BaseAdapter):
         collection_name: str,
         *,
         api_key: str | None = None,
+        vector_dtype: Any = np.float32,
     ) -> QdrantAdapter:
         """Construct an adapter against a remote Qdrant instance.
 
@@ -93,7 +115,7 @@ class QdrantAdapter(BaseAdapter):
                 "qdrant-client not installed. Run: pip install 'vectorpin[qdrant]'"
             ) from e
         client = QdrantClient(url=url, api_key=api_key)
-        return cls(client, collection_name)
+        return cls(client, collection_name, vector_dtype=vector_dtype)
 
     def iter_records(self, *, batch_size: int = 256) -> Iterator[PinnedRecord]:
         offset: Any = None
@@ -130,21 +152,20 @@ class QdrantAdapter(BaseAdapter):
             points=[record_id],
         )
 
-    @staticmethod
-    def _point_to_record(point: Any) -> PinnedRecord:
+    def _point_to_record(self, point: Any) -> PinnedRecord:
         payload = dict(point.payload or {})
-        pin_payload = payload.pop(PIN_METADATA_KEY, None)
-        pin = Pin.from_dict(pin_payload) if pin_payload else None
+        pin, parse_error = parse_pin_field(payload.pop(PIN_METADATA_KEY, None))
         # Qdrant returns vectors as list[float] or None depending on config.
-        vector = np.asarray(point.vector, dtype=np.float32) if point.vector is not None else None
-        if vector is None:
+        if point.vector is None:
             raise ValueError(
                 f"point {point.id!r} has no vector data; "
                 "ensure the collection was queried with with_vectors=True"
             )
+        vector = vector_from_store(point.vector, native_dtype=self._vector_dtype)
         return PinnedRecord(
             id=str(point.id),
             vector=vector,
             pin=pin,
             metadata=payload,
+            parse_error=parse_error,
         )

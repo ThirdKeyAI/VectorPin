@@ -99,3 +99,43 @@ def test_tampered_vector_caught_after_pin(chroma_collection):
     result = verifier.verify(refreshed.pin, source="alpha", vector=tampered)
     assert not result
     assert result.error.value == "vector_tampered"
+
+
+# ---- VP-15: TLS guard for the HTTP client -----------------------------------
+
+
+def test_connect_http_refuses_auth_headers_over_plaintext(monkeypatch):
+    monkeypatch.delenv("VECTORPIN_ALLOW_INSECURE_HTTP", raising=False)
+    with pytest.raises(ValueError, match="non-TLS"):
+        ChromaAdapter.connect_http(
+            host="chroma.internal.example",
+            port=8000,
+            collection_name="c",
+            ssl=False,
+            headers={"Authorization": "Bearer secret"},
+        )
+
+
+def test_connect_http_allows_headers_over_loopback_or_ssl(monkeypatch):
+    """Guard passes; the connection itself then fails because nothing
+    is listening — that failure must come from chromadb, not the guard."""
+    monkeypatch.delenv("VECTORPIN_ALLOW_INSECURE_HTTP", raising=False)
+    from vectorpin.adapters.chroma import _enforce_tls
+
+    _enforce_tls("localhost", False, {"Authorization": "x"})
+    _enforce_tls("127.0.0.1", False, {"Authorization": "x"})
+    _enforce_tls("http://127.0.0.1:8000", False, {"Authorization": "x"})
+    _enforce_tls("chroma.internal.example", True, {"Authorization": "x"})
+    _enforce_tls("chroma.internal.example", False, None)
+    with pytest.raises(ValueError):
+        _enforce_tls("http://chroma.internal.example:8000", False, {"Authorization": "x"})
+    monkeypatch.setenv("VECTORPIN_ALLOW_INSECURE_HTTP", "1")
+    _enforce_tls("chroma.internal.example", False, {"Authorization": "x"})
+
+
+def test_stripped_pin_is_parse_error_not_unpinned(chroma_collection):
+    adapter = ChromaAdapter(chroma_collection)
+    chroma_collection.update(ids=["a"], metadatas=[{"source": "alpha", "vectorpin": ""}])
+    rec = adapter.get("a")
+    assert rec.pin is None
+    assert rec.parse_error is not None

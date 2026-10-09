@@ -127,6 +127,7 @@ def test_audit_lancedb_clean_run(
             kid,
             "--source-column",
             "content",
+            "--allow-unpinned",
         ]
     )
     summary = json.loads(stdout)
@@ -169,6 +170,7 @@ def test_audit_lancedb_detects_tamper(
             kid,
             "--source-column",
             "content",
+            "--allow-unpinned",
         ]
     )
     summary = json.loads(stdout)
@@ -177,6 +179,66 @@ def test_audit_lancedb_detects_tamper(
     assert summary["unpinned"] == 1
     assert "vector_tampered" in stderr
     assert "FAIL a" in stderr
+    assert code == 1
+
+
+def test_audit_lancedb_unpinned_fails_closed_by_default(
+    lance_pinned_table: tuple[Path, str], keypair_files: tuple[Path, Path, str]
+) -> None:
+    """VP-2: without --allow-unpinned an unpinned record fails the run
+    and is named on stderr, so pin stripping cannot hide as 'unpinned'."""
+    db_dir, table = lance_pinned_table
+    pub, _priv, kid = keypair_files
+    code, stdout, stderr = _run_cli(
+        [
+            "audit-lancedb",
+            "--uri",
+            str(db_dir),
+            "--table",
+            table,
+            "--public-key",
+            str(pub),
+            "--key-id",
+            kid,
+            "--source-column",
+            "content",
+        ]
+    )
+    summary = json.loads(stdout)
+    assert summary["unpinned"] == 1
+    assert summary["verification_failed"] == 1
+    assert "FAIL c [unpinned]" in stderr
+    assert code == 1
+
+
+def test_audit_lancedb_stripped_pin_is_parse_error_not_unpinned(
+    lance_pinned_table: tuple[Path, str], keypair_files: tuple[Path, Path, str]
+) -> None:
+    """VP-2: blanking the pin field (what an attacker who can rewrite the
+    vector would do) is a parse_error even with --allow-unpinned."""
+    db_dir, table = lance_pinned_table
+    pub, _priv, kid = keypair_files
+    db = lancedb.connect(str(db_dir))
+    tbl = db.open_table(table)
+    tbl.update(where="id = 'a'", values={PIN_METADATA_KEY: "   "})
+    code, stdout, stderr = _run_cli(
+        [
+            "audit-lancedb",
+            "--uri",
+            str(db_dir),
+            "--table",
+            table,
+            "--public-key",
+            str(pub),
+            "--key-id",
+            kid,
+            "--allow-unpinned",
+        ]
+    )
+    summary = json.loads(stdout)
+    assert summary["unpinned"] == 1  # only 'c'
+    assert summary["verification_failed"] == 1
+    assert "FAIL a [parse_error]" in stderr
     assert code == 1
 
 
@@ -201,6 +263,7 @@ def test_audit_chroma_clean_run(
             kid,
             "--source-metadata-key",
             "text",
+            "--allow-unpinned",
         ]
     )
     summary = json.loads(stdout)
@@ -232,6 +295,7 @@ def test_audit_chroma_signature_only(
             str(pub),
             "--key-id",
             kid,
+            "--allow-unpinned",
         ]
     )
     summary = json.loads(stdout)

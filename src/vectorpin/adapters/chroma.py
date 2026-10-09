@@ -17,16 +17,57 @@ Install with: pip install 'vectorpin[chroma]'
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from vectorpin.adapters.base import PIN_METADATA_KEY, BaseAdapter, PinnedRecord
+from vectorpin.adapters.base import (
+    PIN_METADATA_KEY,
+    BaseAdapter,
+    PinnedRecord,
+    parse_pin_field,
+    vector_from_store,
+)
 from vectorpin.attestation import Pin
 
 if TYPE_CHECKING:
     from chromadb.api.models.Collection import Collection
+
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _is_loopback(host: str | None) -> bool:
+    if not host:
+        return False
+    h = host.strip("[]").lower()
+    if h in _LOOPBACK_HOSTS:
+        return True
+    return h.startswith("127.")
+
+
+def _enforce_tls(host: str, ssl: bool, headers: dict[str, str] | None) -> None:
+    """Refuse to send auth headers over plaintext to a non-loopback host.
+
+    Same contract as the Qdrant / Pinecone / pgvector adapters: a
+    credential-bearing header over ``http://`` leaks the credential.
+    ``VECTORPIN_ALLOW_INSECURE_HTTP=1`` is the environment-scoped
+    escape hatch for trusted in-cluster overlays.
+    """
+    if not headers or ssl:
+        return
+    # Accept a bare hostname or a URL; only the host part matters.
+    bare = host.split("://", 1)[1] if "://" in host else host
+    bare = bare.split("/", 1)[0].rsplit(":", 1)[0] if not bare.startswith("[") else bare
+    if _is_loopback(bare):
+        return
+    if os.environ.get("VECTORPIN_ALLOW_INSECURE_HTTP") == "1":
+        return
+    raise ValueError(
+        "auth headers with non-TLS Chroma host refused "
+        "(pass ssl=True, or set VECTORPIN_ALLOW_INSECURE_HTTP=1 if you know what you're doing)"
+    )
 
 
 class ChromaAdapter(BaseAdapter):
@@ -58,7 +99,13 @@ class ChromaAdapter(BaseAdapter):
         ssl: bool = False,
         headers: dict[str, str] | None = None,
     ) -> ChromaAdapter:
-        """Open a Chroma collection over the HTTP API."""
+        """Open a Chroma collection over the HTTP API.
+
+        If ``headers`` carries credentials, the host must be loopback or
+        ``ssl`` must be set; otherwise the connection is refused unless
+        ``VECTORPIN_ALLOW_INSECURE_HTTP=1`` is set in the environment.
+        """
+        _enforce_tls(host, ssl, headers)
         try:
             import chromadb
         except ImportError as e:
@@ -131,10 +178,14 @@ class ChromaAdapter(BaseAdapter):
                 f"record {rid!r} has no embedding; "
                 "ensure include=['embeddings'] was passed and the collection has vectors"
             )
-        vector = np.asarray(embedding, dtype=np.float32)
-        if vector.ndim != 1:
-            raise ValueError(f"embedding for {rid!r} returned non-1D shape {vector.shape}")
+        # Chroma persists single-precision vectors (its HNSW index and
+        # segment storage are float32). Depending on client version the
+        # values come back as a float32 ndarray, a float64 ndarray, or a
+        # list of Python floats; all carry the same float32 values, and
+        # `vector_from_store` checks that the narrowing is exact.
+        vector = vector_from_store(embedding, native_dtype=np.float32)
         meta = dict(metadata or {})
-        pin_payload = meta.pop(PIN_METADATA_KEY, None)
-        pin = Pin.from_json(pin_payload) if pin_payload else None
-        return PinnedRecord(id=str(rid), vector=vector, pin=pin, metadata=meta)
+        pin, parse_error = parse_pin_field(meta.pop(PIN_METADATA_KEY, None))
+        return PinnedRecord(
+            id=str(rid), vector=vector, pin=pin, metadata=meta, parse_error=parse_error
+        )

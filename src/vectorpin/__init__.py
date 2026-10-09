@@ -39,6 +39,16 @@ from vectorpin.hash import (
     hash_vector,
     native_dtype,
 )
+from vectorpin.manifest import (
+    CollectionManifest,
+    ManifestError,
+    ManifestResult,
+    build_manifest,
+    merkle_root,
+    sign_audit_summary,
+    verify_audit_summary,
+    verify_manifest,
+)
 from vectorpin.signer import Signer
 from vectorpin.verifier import (
     KeyEntry,
@@ -52,17 +62,25 @@ __version__ = "0.2.0"
 __all__ = [
     "DOMAIN_TAG",
     "PROTOCOL_VERSION",
+    "CollectionManifest",
     "KeyEntry",
     "LegacyV1Verifier",
+    "ManifestError",
+    "ManifestResult",
     "Pin",
     "PinHeader",
     "Signer",
     "VerificationResult",
     "Verifier",
     "VerifyError",
+    "build_manifest",
     "canonical_vector_bytes",
     "hash_files",
     "hash_text",
     "hash_vector",
+    "merkle_root",
     "native_dtype",
+    "sign_audit_summary",
+    "verify_audit_summary",
+    "verify_manifest",
 ]
