@@ -44,20 +44,49 @@ jobs:
       - name: rustfmt
         run: cargo fmt --all -- --check
       - name: clippy
-        run: cargo clippy -j2 --all-targets -- -D warnings
+        run: cargo clippy -j2 --all-targets --all-features -- -D warnings
       - name: test
-        run: cargo test -j2 --all-targets
+        run: cargo test -j2 --all-targets --all-features
       - name: doctest
         run: cargo test -j2 --doc
 
+  typescript:
+    name: TypeScript (Node 20)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: typescript
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: typescript/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Test
+        run: npm test
+
   cross-language-fixtures-up-to-date:
-    name: testvectors/ matches Python output
+    name: testvectors/ matches Python output and every port consumes it
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: typescript/package-lock.json
       - name: Install
         run: |
           python -m pip install --upgrade pip
@@ -71,3 +100,41 @@ jobs:
             git diff testvectors/
             exit 1
           fi
+      - name: Python consumes the regenerated fixtures
+        run: pytest -q tests/test_v2_test_vectors.py
+      - name: Rust consumes the regenerated fixtures
+        working-directory: rust
+        run: cargo test -j2 --test cross_lang --test legacy_v1
+      - name: TypeScript consumes the regenerated fixtures
+        working-directory: typescript
+        run: |
+          npm ci
+          npx tsx --test test/cross-lang.test.ts test/legacy-v1.test.ts
+
+  supply-chain:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: cargo audit
+        working-directory: rust
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+      - name: npm audit (production dependencies)
+        working-directory: typescript
+        run: |
+          npm ci
+          npm audit --omit=dev
+      - name: pip-audit
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          pip install -e "."
+          pip-audit

@@ -24,7 +24,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "cryptography>=42,<46",
+    "cryptography>=42",
     "numpy>=1.26,<3",
 ]
 
@@ -53,6 +53,7 @@ all = [
 dev = [
     "pytest>=7.4",
     "pytest-cov>=4.0",
+    "hypothesis>=6.100",
     "ruff>=0.15",
     "mypy>=1.5",
 ]
