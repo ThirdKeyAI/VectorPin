@@ -28,15 +28,19 @@
 //     if (!result.ok) throw new Error(`verify failed: ${result.error}`);
 
 export {
+  assertSafeString,
   b64UrlDecodeNoPad,
   b64UrlEncodeNoPad,
   canonicalizeHeader,
   canonicalizeHeaderV1,
   canonicalJsonStringify,
   DOMAIN_TAG,
+  isValidCalendarTs,
   MAX_EXTRA_ENTRIES,
   MAX_EXTRA_KEY_BYTES,
   MAX_EXTRA_VALUE_BYTES,
+  MAX_KID_BYTES,
+  MAX_MODEL_BYTES,
   MAX_PIN_JSON_BYTES,
   MAX_VEC_DIM,
   pinFromDict,
@@ -46,16 +50,20 @@ export {
   pinToJSON,
   PROTOCOL_VERSION,
   SIG_LEN,
+  utf8ByteLength,
   type Pin,
   type PinHeader,
   type PinParseOptions,
 } from './attestation.js';
 
 export {
+  assertNoLoneSurrogates,
   canonicalVectorBytes,
   hashBytes,
   hashText,
   hashVector,
+  nativeDtype,
+  vectorElementWidth,
   type VecDtype,
   type VectorInput,
 } from './hash.js';
