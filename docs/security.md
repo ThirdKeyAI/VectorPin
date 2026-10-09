@@ -30,20 +30,40 @@ All three implementations (Python, Rust, TypeScript) bind the algorithm and the 
 
 ## Threat Model
 
-VectorPin is designed against an attacker who can:
+**The protected interval begins at signing.** A pin proves the vector has not changed since the signer saw it. VectorPin is designed against an attacker who, *after* a pin is signed, can:
 
-- ✅ **Modify vectors after they are produced** — via a poisoned ingestion pipeline, a compromised vector DB, or backup-level access. This is the steganography attack class from [VectorSmuggle](https://github.com/jaschadub/VectorSmuggle). VectorPin catches this with `VECTOR_TAMPERED`.
+- ✅ **Modify vectors in the store, in backups, or anywhere downstream of the signer** — in the dtype the store persists, at any magnitude down to a single bit. This is the steganography attack class from [VectorSmuggle](https://github.com/jaschadub/VectorSmuggle). VectorPin catches it with `VECTOR_TAMPERED`.
+- ✅ **Modify low-order bits of a wider-than-pinned stored vector** (an f64 store under an f32 pin). Verifiers refuse the wider representation outright (`SHAPE_MISMATCH`) instead of casting; adapters surface the store's native dtype.
 - ✅ **See the public verification key**, but not the private signing key. Ed25519 public-key recovery is computationally infeasible.
-- ✅ **Replay or selectively delete pins** within a corpus — partly mitigated via `vectorpin.record_id` / `vectorpin.collection_id` / `vectorpin.tenant_id` in `extra` (see [Replay Protection](#replay-protection)).
+- ✅ **Replay pins across records, collections, or tenants** — caught when `vectorpin.record_id` / `vectorpin.collection_id` / `vectorpin.tenant_id` are bound at pin time and enforced at verify time. The audit CLI enforces `record_id` by default and takes `--collection-id` / `--tenant-id` (see [Replay Protection](#replay-protection)).
+- ✅ **Strip or blank pins** — the audit fails closed: an unpinned record is a failure unless `--allow-unpinned`, and an empty pin field is always a `parse_error`.
+- ✅ **Delete or insert whole records** — caught by a signed per-collection manifest (record count plus Merkle root over `record_id → vec_hash`) written at ingestion and checked with `--manifest`. Store it where the database administrator cannot rewrite it.
 - ✅ **Strip new fields and present a downgraded pin** — defeated by `v` and `kid` being in the signed canonical bytes, plus strict rejection of unknown top-level fields.
-- ✅ **Reuse a signature against a sister Trust-Stack protocol** — defeated by the 13-byte `vectorpin/v2\x00` domain separator.
+- ✅ **Reuse a signature against a sister Trust-Stack protocol** — defeated by the 13-byte `vectorpin/v2\x00` domain separator (manifests and signed audit summaries use their own tags).
+- ✅ **Forge or edit the audit report** — defeated by signing the summary (`--sign-summary-key`) and checking it with `vectorpin verify-summary` on a host the DB administrator does not control.
 
 VectorPin does **not** defend against:
 
-- ❌ **An attacker with the private signing key.** Out of scope; key custody is the user's responsibility. See [Key Custody](deployment.md#key-custody).
+- ❌ **An attacker with the private signing key, or with write access to the component that invokes it.** A "poisoned ingestion pipeline" is in scope only downstream of the signer; a writer upstream of (or at) the signing call obtains legitimately signed pins. Key custody is the user's responsibility, and signing should run in a separate service or KMS the pipeline cannot invoke arbitrarily. See [Key Custody](deployment.md#key-custody) and [Architecture](deployment.md#architecture-overview).
 - ❌ **An attacker who modifies source documents *before* embedding.** Pair with upstream content integrity controls (signed ingestion logs, document provenance).
-- ❌ **An attacker who uses a legitimate signing key to attest a malicious vector at ingestion time.** Pair with upstream input validation; see [Statistical Detectors](detectors.md) for defense-in-depth.
-- ❌ **Cross-record replay within a corpus** unless the caller uses `vectorpin.record_id` and verifies it.
+- ❌ **Model substitution by label.** `model` is a free string and `model_hash` is only as trustworthy as the signer that wrote it. Require a specific weights hash with `expected_model_hash` / `--expected-model-hash` where it is known; see [Statistical Detectors](detectors.md) for defense-in-depth.
+- ❌ **Backdated forgeries against revocation** unless a verifier-trusted ingestion time is supplied (`trusted_time`); see [Revocation](#revocation-and-trusted-time).
+- ❌ **Modifications to quantized or index copies of a vector**; see [Quantization boundary](#quantization-boundary).
+
+### Revocation and trusted time
+
+`valid_until` on a key entry is compared against the pin's `ts`, which the signer writes. A holder of a compromised key can therefore backdate `ts` into the window. On its own the window bounds honest signers only. Record an ingestion timestamp from a clock the key holder cannot write (the store's own `created_at`, a database default, or a timestamp-authority countersignature) and pass it as `trusted_time` / `trustedTime` / `VerifyOptions::trusted_time`: the window is then evaluated against that instant, and a pin whose `ts` postdates it is rejected.
+
+### Quantization boundary
+
+VectorPin verifies the vector the store persists for the record, in that store's native dtype. It does not verify HNSW graphs, product-quantization codes, binary or half-precision index copies, or any other derived structure that drives approximate retrieval; those are rebuilt from the stored vector and are outside the integrity boundary. Two consequences:
+
+- A store that persists *only* a quantized form (for example a pgvector `halfvec` or `bit` column with no full-precision copy) cannot verify an `f32` pin — every record will read as `VECTOR_TAMPERED` because the stored values are not the signed values. Pin the quantized values under the dtype the store persists, or keep a full-precision copy.
+- "Steganographic encoding that survives database quantization" is defended by verifying the unquantized original: an attacker who rewrites the original is caught; one who rewrites only an index copy is not, and must be caught by rebuilding the index from verified originals.
+
+### Read-path verification
+
+A scheduled audit is a backstop, not a read-path control. Every adapter exposes `get_verified(record_id, verifier, ...)` and `iter_verified(verifier, ...)`, which return the record together with a structured verdict (unpinned and unparseable records fail closed, `vectorpin.record_id` is enforced) and never raise on record content. Retrieval layers that only read through these wrappers never hand an unverified vector to a model.
 
 ---
 

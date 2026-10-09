@@ -11,7 +11,7 @@
 [![arXiv](https://img.shields.io/badge/arXiv-2605.13764-b31b1b.svg)](https://arxiv.org/abs/2605.13764)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20058256.svg)](https://doi.org/10.5281/zenodo.20058256)
 
-Vector databases are the new soft underbelly of the AI stack. Models trust them. Agents query them. Compliance audits don't yet ask about them. VectorPin pins every embedding to its source content and the model that produced it, then continuously verifies the store has not been tampered with — including covert steganographic modifications invisible to traditional DLP.
+Vector databases are the new soft underbelly of the AI stack. Models trust them. Agents query them. Compliance audits don't yet ask about them. VectorPin pins every embedding to its source content and the model that produced it, then lets you verify — on every read through the adapter read wrappers, and on a schedule through the audit CLI — that nothing in the store has changed since it was signed, including covert steganographic modifications invisible to traditional DLP.
 
 **[Documentation: docs.vectorpin.org](https://docs.vectorpin.org/)** · [arXiv preprint](https://arxiv.org/abs/2605.13764) · [Source: github.com/ThirdKeyAI/VectorPin](https://github.com/ThirdKeyAI/VectorPin)
 
@@ -31,7 +31,7 @@ That's a giant attack surface. The companion [VectorSmuggle](https://github.com/
 - Cross-model fragmentation
 - Steganographic encoding that survives database quantization
 
-Cryptographic pinning is the kill shot for these attacks. Every steganographic technique requires modifying the vector after the model produces it. If each vector ships with a signed attestation binding it to its source text and the producing model, any modification breaks the signature.
+Cryptographic pinning is the kill shot for these attacks. Every steganographic technique requires modifying the vector after the model produces it. If each vector ships with a signed attestation binding it to its source text and the producing model, any modification made *after signing* to the stored vector — in the precision the store persists, down to a single bit — breaks verification. Two boundaries matter: the protected interval begins at signing (a writer upstream of the signer is not caught — see [Threat model](#threat-model)), and VectorPin verifies the stored vector in its native dtype, not quantized index copies (PQ codes, binary or half-precision index structures) built from it — see [Quantization boundary](docs/security.md#quantization-boundary). A verifier never narrows a wider stored vector before hashing: an f64 store checked against an f32 pin is refused outright, because the bits a cast discards would otherwise be an unverified covert channel.
 
 ## Quick start
 
@@ -117,7 +117,9 @@ const result = verifier.verify(pin, {
 if (!result.ok) throw new Error(`integrity failure: ${result.error}`);
 ```
 
-The Python, Rust, and TypeScript implementations are byte-for-byte compatible. A pin produced by any of them verifies on the other two, enforced by shared test vectors at [`testvectors/v1.json`](testvectors/) consumed in all three test suites. The TS port is pure JavaScript via [`@noble/ed25519`](https://github.com/paulmillr/noble-ed25519) and [`@noble/hashes`](https://github.com/paulmillr/noble-hashes), so it also runs in Deno, Bun, and edge runtimes.
+The Python, Rust, and TypeScript implementations are byte-for-byte compatible. A pin produced by any of them verifies on the other two, enforced by shared test vectors at [`testvectors/v2.json`](testvectors/) and [`testvectors/negative_v2.json`](testvectors/) consumed in all three test suites, each of which runs in CI (`ci.yml` has `python`, `rust`, and `typescript` jobs plus a job that regenerates the fixtures and runs every port's cross-language tests against them). The TS port is pure JavaScript via [`@noble/ed25519`](https://github.com/paulmillr/noble-ed25519) and [`@noble/hashes`](https://github.com/paulmillr/noble-hashes) with no dependency on Node's `Buffer`, so it also runs in Deno, Bun, and edge runtimes.
+
+Pin under the dtype your store persists. Signers default to the input array's native dtype (`float32` → `f32`, `float64` → `f64`); verifiers refuse a stored vector wider than the pinned dtype and will not hash-match a narrower one. If your embedding API hands you 64-bit floats but your store persists 32-bit, pass `vec_dtype="f32"` (`vecDtype: 'f32'`) explicitly.
 
 ## What VectorPin guarantees
 
@@ -264,23 +266,25 @@ In the VectorSmuggle empirical study, this single line of defense flagged every 
 
 ## Threat model
 
-VectorPin is designed against an attacker who can:
+**The protected interval begins at signing.** A pin proves that the vector has not changed since the signer saw it; it cannot prove anything about what happened before. VectorPin is designed against an attacker who, *after* a pin is signed, can:
 
-- Modify vectors after they are produced (via a poisoned ingestion pipeline, a compromised vector DB, or backup-level access)
+- Modify vectors in the vector DB, in backups, or anywhere downstream of the signer — in the dtype the store persists (any magnitude, down to a single bit) or in a wider representation (refused outright, never narrowed)
 - See the public verification key, but not the private signing key
-- Replay or selectively delete pins
+- Replay pins across records, collections, or tenants (caught when `vectorpin.record_id` / `collection_id` / `tenant_id` are bound and enforced — the audit CLI enforces `record_id` by default)
+- Strip or blank pins, or delete and insert records (caught by the fail-closed audit, which treats an unpinned record as a failure unless `--allow-unpinned`, and by a signed per-collection manifest — count plus Merkle root — produced at ingestion and checked with `--manifest`)
 
 VectorPin does **not** defend against:
 
-- An attacker with the private signing key (out of scope; key custody is the user's responsibility)
+- An attacker with the private signing key, or with write access to the component that invokes it. A "poisoned ingestion pipeline" is in scope only downstream of the signer: if the attacker's write point is upstream of (or is) the signing call, the steganographic vector is signed legitimately. Move signing to the earliest trustworthy point — a separate signing service or KMS the pipeline cannot invoke arbitrarily, rate-limited and logged — rather than co-locating it with ingestion. See [Deployment](docs/deployment.md#architecture-overview).
 - An attacker who modifies the source documents *before* embedding (use upstream content integrity controls)
-- An attacker who uses a legitimate signing key to attest a malicious vector at ingestion time (use upstream input validation)
+- Model substitution by label: `model` is a self-declared string and `model_hash` is only as trustworthy as the signer that wrote it. Require a specific hash with `expected_model_hash` / `--expected-model-hash` where the weights are known; nothing fingerprints the producing model otherwise.
+- Backdating against revocation: `ts` is signer-chosen, so a `valid_until` window on its own only bounds honest signers. Supply a verifier-trusted ingestion time (`trusted_time` / `trustedTime` / `VerifyOptions::trusted_time`) from a clock the key holder cannot write to close this. See [`docs/spec.md`](docs/spec.md) §7.
 
 ## Status
 
-Alpha (`v0.1`). Core protocol (`Pin`, `Signer`, `Verifier`) is stable and tested. Python and Rust ports are byte-for-byte compatible and locked together by shared test vectors in CI. Adapter coverage is partial. Hosted attestation service is not yet available.
+Beta (`v0.2`). Core protocol (`Pin`, `Signer`, `Verifier`) is stable and tested. The Python, Rust, and TypeScript ports are byte-for-byte compatible and locked together by shared test vectors in CI. Adapter coverage is partial. Hosted attestation service is not yet available.
 
-The protocol version field (`v: 1`) lets future revisions break compatibility cleanly. We will not break existing pins without bumping the major version. See [`docs/spec.md`](docs/spec.md) for the wire-format specification.
+The protocol version field (`v: 2`) lets future revisions break compatibility cleanly. We will not break existing pins without bumping the major version. See [`docs/spec.md`](docs/spec.md) for the wire-format specification.
 
 ## Citation
 
@@ -304,7 +308,7 @@ If you reference VectorPin or the threat model it defends against, please cite t
 ## Related work
 
 - [VectorSmuggle](https://github.com/jaschadub/VectorSmuggle) — companion threat-research project demonstrating the attacks VectorPin defends against. Empirical results in the [arXiv preprint](https://arxiv.org/abs/2605.13764).
-- [Symbiont](https://github.com/ThirdKeyAI/Symbiont) — policy-governed agent runtime; consumes VectorPin attestations to enforce "agents may only retrieve from verified vector stores."
+- [Symbiont](https://github.com/ThirdKeyAI/Symbiont) — policy-governed agent runtime. Its enterprise console backend consumes VectorPin attestations (an optional dependency on this crate) to enforce "agents may only retrieve from verified vector stores"; the open-source runtime does not yet integrate VectorPin.
 - [SchemaPin](https://github.com/ThirdKeyAI/SchemaPin) — sister project doing the same kind of cryptographic provenance for tool schemas in MCP.
 - [sigstore](https://www.sigstore.dev/) — inspired our approach to OSS-friendly cryptographic provenance.
 

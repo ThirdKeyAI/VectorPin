@@ -12,18 +12,38 @@ of the VectorPin protocol. Every language implementation
   vector bytes, dtype, dim, timestamp, optional model_hash / extra)
   and the produced pin JSON, expected canonical bytes (with the
   `vectorpin/v2\x00` domain tag prepended), and component hashes.
-  Includes four positive entries: small f32, small f64, pin with
-  `model_hash`, and pin with `extra` containing a `vectorpin.record_id`
-  replay-protection key.
+  Seven entries: small f32, small f64, pin with `model_hash`, pin with
+  `extra` containing a `vectorpin.record_id` replay-protection key,
+  f32 IEEE-754 edge cases (signed zeros, subnormals, max, 1 + ulp),
+  f64 edge cases, and an f64 input pinned as f32 whose values are
+  exact round-to-nearest-even ties. That last entry carries
+  `input.vec_native_dtype: "f64"`: `vec_b64` holds the f64 input
+  bytes, the signer casts at sign time, and consumers verify with the
+  f32 cast (what an f32 store persists) — verifying with the f64 input
+  itself is a SHAPE_MISMATCH under the §3.2 precision rule.
 
-- `negative_v2.json` — negative fixtures. One entry per failure mode
-  in spec §5: VECTOR_TAMPERED, SOURCE_MISMATCH, MODEL_MISMATCH,
-  SIGNATURE_INVALID (bit-flip, vec_dim tamper), UNSUPPORTED_VERSION,
-  UNKNOWN_KEY, PARSE_ERROR (wrong sig length, unknown top-level field,
-  non-string extra, NaN at verify, NFD string, malformed timestamps,
-  oversize pin), and RECORD_MISMATCH. Each entry carries a
-  `description` and an `expected_failure` code matching a v2
-  VerifyError enum value.
+- `negative_v2.json` — negative fixtures covering every failure mode
+  in spec §5: VECTOR_TAMPERED, SOURCE_MISMATCH, MODEL_MISMATCH (wrong
+  model, wrong / missing model_hash), SIGNATURE_INVALID (bit-flip,
+  vec_dim tamper), UNSUPPORTED_VERSION, UNKNOWN_KEY, KEY_EXPIRED
+  (ts after valid_until; backdated ts caught by a trusted time),
+  SHAPE_MISMATCH (truncated vector; f64 vector with low-bit
+  perturbation against an f32 pin; f32-exact f64 vector against an
+  f32 pin), PARSE_ERROR (wrong sig length, padded sig, non-canonical
+  trailing bits, unknown top-level field, non-string extra,
+  `extra: null`, `v: 2.0`, NaN at verify, NFD string, lone surrogate,
+  malformed and calendar-invalid timestamps, oversize pin, kid / model
+  over the field caps), RECORD_MISMATCH, COLLECTION_MISMATCH, and
+  TENANT_MISMATCH. Each entry carries a `description` and an
+  `expected_failure` code matching a v2 VerifyError enum value.
+
+  Optional per-entry inputs consumers must honor: `tampered_vec_b64` /
+  `nan_vec_b64` with `vec_dtype` (the dtype of the *supplied* bytes,
+  which may be wider than the pin's) and `vec_dim`; `tampered_source`;
+  `expected_model`; `expected_model_hash`; `expected_record_id` /
+  `expected_collection_id` / `expected_tenant_id`; `key_valid_from` /
+  `key_valid_until` (register the key with that window); and
+  `trusted_time` (pass as the verifier-trusted instant).
 
 ### Protocol v1 (legacy)
 
@@ -68,7 +88,5 @@ data, not production keys.
 
 v2 pins are signed over `DOMAIN_TAG || canonical_json(header)` where
 `DOMAIN_TAG = b"vectorpin/v2\x00"` (13 bytes — 12 ASCII characters
-"vectorpin/v2" plus one NUL terminator). The spec text in
-`docs/spec.md` describes this as a "14-byte tag"; the byte string
-itself is 13 bytes and ports MUST match those exact bytes. See
-`src/vectorpin/attestation.py` for the canonical constant.
+"vectorpin/v2" plus one NUL terminator). Ports MUST match those exact
+bytes. See `src/vectorpin/attestation.py` for the canonical constant.

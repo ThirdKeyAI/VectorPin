@@ -37,8 +37,10 @@ This is **protocol v2**. The TypeScript port consumes the same `testvectors/v2.j
 
 ## Runtime support
 
-- Node.js 20+ (uses `Buffer.from(s, 'base64url')` and `globalThis.crypto.getRandomValues`).
-- The crypto path is pure JavaScript via [`@noble/ed25519`](https://github.com/paulmillr/noble-ed25519) and [`@noble/hashes`](https://github.com/paulmillr/noble-hashes), so it also works in Deno, Bun, and Cloudflare Workers. Replace the `Buffer.from('base64url')` calls if you target a runtime without `Buffer`.
+- Node.js 20+ (requires `globalThis.crypto.getRandomValues`; the test suite uses `node:test`).
+- The library has no dependency on Node's `Buffer` or any other Node-only API: base64url and UTF-8 length are implemented in plain JavaScript, and the crypto path is pure JavaScript via [`@noble/ed25519`](https://github.com/paulmillr/noble-ed25519) and [`@noble/hashes`](https://github.com/paulmillr/noble-hashes), so it also works in Deno, Bun, browsers, and Cloudflare Workers.
+
+Vectors: pass a `Float32Array` when your store persists single precision. A `Float64Array` and a plain `number[]` are 64-bit representations; the signer pins them as `f64` by default (pass `vecDtype: 'f32'` to commit to the single-precision rounding), and the verifier refuses them against an `f32` pin rather than narrowing.
 
 ## Build & test
 

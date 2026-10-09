@@ -319,7 +319,9 @@ vectorpin audit-lancedb \
   --source-column text
 ```
 
-JSON summary on stdout, non-zero exit on any failure — drops into CI or cron unchanged. See [CLI Guide](cli-guide.md#audit-commands) for the audit commands across all backends.
+JSON summary on stdout, non-zero exit on any failure — drops into CI or cron unchanged. Unpinned records fail the run unless you pass `--allow-unpinned` (useful while a corpus is being pinned for the first time). See [CLI Guide](cli-guide.md#audit-commands) for the audit commands across all backends and the binding, manifest, and summary-signing flags.
+
+**Pin under the dtype your store persists.** Signers default to the input array's native dtype (`float32` → `f32`, `float64` → `f64`). Verifiers refuse a stored vector that is wider than the pinned dtype and will not hash-match a narrower one, so if your embedding API returns 64-bit floats and your store persists 32-bit, pass `vec_dtype="f32"` (`vecDtype: 'f32'`, `PinOptions { dtype: Some(VecDtype::F32) }`).
 
 ---
 
