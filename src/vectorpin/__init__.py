@@ -3,9 +3,10 @@
 """VectorPin — verifiable integrity for AI embedding stores.
 
 VectorPin pins each embedding to its source content and the model that
-produced it, then continuously verifies the store has not been tampered
-with — including covert steganographic modifications invisible to
-traditional DLP.
+produced it, then lets you verify — on every read through the adapter
+read wrappers, and on a schedule through the audit CLI — that the store
+has not been tampered with since signing, including covert
+steganographic modifications invisible to traditional DLP.
 
 Part of the ThirdKey Trust Stack.
 
@@ -31,7 +32,13 @@ from vectorpin.attestation import (
     Pin,
     PinHeader,
 )
-from vectorpin.hash import canonical_vector_bytes, hash_text, hash_vector
+from vectorpin.hash import (
+    canonical_vector_bytes,
+    hash_files,
+    hash_text,
+    hash_vector,
+    native_dtype,
+)
 from vectorpin.signer import Signer
 from vectorpin.verifier import (
     KeyEntry,
@@ -54,6 +61,8 @@ __all__ = [
     "Verifier",
     "VerifyError",
     "canonical_vector_bytes",
+    "hash_files",
     "hash_text",
     "hash_vector",
+    "native_dtype",
 ]

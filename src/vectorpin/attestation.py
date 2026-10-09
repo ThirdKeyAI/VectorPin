@@ -16,7 +16,7 @@ canonical byte sequence built by `PinHeader.canonicalize()` — NOT over
 the JSON encoding — so that downstream re-serialization (whitespace,
 key order) cannot invalidate signatures.
 
-Protocol version: PROTOCOL_VERSION (currently 2). v2 includes a 14-byte
+Protocol version: PROTOCOL_VERSION (currently 2). v2 includes a 13-byte
 domain separator (`DOMAIN_TAG`) prepended to the canonical JSON before
 signing, and binds BOTH `v` and `kid` into the signed payload to
 prevent downgrade and key-swap attacks. See docs/spec.md §4.2 and §12
@@ -34,6 +34,7 @@ import json
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 # ---- protocol identifiers ----
@@ -42,13 +43,8 @@ PROTOCOL_VERSION = 2
 
 # 13 ASCII bytes: literally "vectorpin/v2" + NUL terminator. Prepended
 # to canonical JSON before Ed25519 signing so a VectorPin v2 signature
-# cannot collide with any other "signed canonical JSON" message.
-#
-# Note: docs/spec.md §2 and §4.2 describe this literal as "14 bytes"
-# — that count is a typo in the spec; the literal `b"vectorpin/v2\x00"`
-# is unambiguously 13 bytes (12 ASCII characters plus one NUL). The
-# byte string IS the contract; cross-language ports MUST match these
-# bytes regardless of the byte-count gloss in the spec text.
+# cannot collide with any other "signed canonical JSON" message. The
+# byte string IS the contract; cross-language ports MUST match it.
 DOMAIN_TAG = b"vectorpin/v2\x00"
 DOMAIN_TAG_LEN = 13
 assert len(DOMAIN_TAG) == DOMAIN_TAG_LEN, (
@@ -67,6 +63,13 @@ MAX_PIN_JSON_BYTES = 65536
 MAX_EXTRA_ENTRIES = 32
 MAX_EXTRA_KEY_BYTES = 128
 MAX_EXTRA_VALUE_BYTES = 1024
+
+# Per-field caps on the free-form string scalars (§4.3). Checked before
+# NFC normalization and the control-character scan so a hostile pin
+# handed to `from_dict` (which has no pre-parse byte cap of its own)
+# cannot push a multi-megabyte string through those passes.
+MAX_KID_BYTES = 256
+MAX_MODEL_BYTES = 1024
 
 # Hard ceiling on vec_dim. 2^20 components is far above any real
 # embedding while still preventing pathological allocations downstream.
@@ -111,18 +114,41 @@ def _b64(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
 
+_B64URL_RE = re.compile(r"^[A-Za-z0-9_-]*$")
+
+
 def _b64dec(s: str) -> bytes:
-    """Inverse of _b64; restores stripped padding."""
+    """Strict inverse of _b64.
+
+    Accepts only the URL-safe alphabet with no padding, and only the
+    canonical encoding of the decoded bytes (no non-zero trailing bits,
+    no length that could not have been produced by the encoder). This
+    matches the Rust port's `URL_SAFE_NO_PAD` decoder so a pin accepted
+    by one implementation is never rejected by another on `sig` alone.
+    """
+    if not _B64URL_RE.match(s):
+        raise ValueError("not URL-safe base64 without padding")
+    if len(s) % 4 == 1:
+        raise ValueError("invalid base64 length")
     pad = "=" * (-len(s) % 4)
-    return base64.urlsafe_b64decode(s + pad)
+    decoded = base64.b64decode(s.translate(_URLSAFE_TO_STD) + pad, validate=True)
+    if _b64(decoded) != s:
+        raise ValueError("non-canonical base64 encoding")
+    return decoded
+
+
+_URLSAFE_TO_STD = str.maketrans("-_", "+/")
 
 
 def _check_string_safe(value: str, field_name: str) -> None:
-    """Reject control chars (U+0000-U+001F) and bidi overrides.
+    """Reject control chars (U+0000-U+001F), bidi overrides, and surrogates.
 
     Per §3.1, any string-typed field must be free of:
       - Control characters U+0000-U+001F
       - Bidirectional overrides U+202A-U+202E, U+2066-U+2069
+      - Surrogate code points U+D800-U+DFFF (a Python ``str`` can hold a
+        lone surrogate that has no UTF-8 encoding; such a value would
+        crash canonicalization instead of being rejected)
     """
     for ch in value:
         cp = ord(ch)
@@ -134,6 +160,70 @@ def _check_string_safe(value: str, field_name: str) -> None:
             raise ValueError(
                 f"{field_name} contains bidi-override character U+{cp:04X}"
             )
+        if 0xD800 <= cp <= 0xDFFF:
+            raise ValueError(
+                f"{field_name} contains surrogate code point U+{cp:04X}"
+            )
+
+
+def _check_byte_cap(value: str, limit: int, field_name: str) -> None:
+    """Reject a string whose UTF-8 encoding exceeds ``limit`` bytes.
+
+    Uses a code-point upper bound first (4 bytes per code point) so an
+    enormous string is refused without ever being encoded.
+    """
+    if len(value) > limit:
+        raise ValueError(f"{field_name} exceeds maximum {limit} bytes")
+    if len(value.encode("utf-8", errors="surrogatepass")) > limit:
+        raise ValueError(f"{field_name} exceeds maximum {limit} bytes")
+
+
+def _check_ts_calendar(ts: str, field_name: str = "ts") -> None:
+    """Reject a regex-shaped `ts` that is not a real UTC instant.
+
+    The §4.1 pattern only constrains digit positions, so `2026-13-00`
+    matches it. Every port additionally requires month 01-12, a day
+    valid for that month (proleptic Gregorian, leap years honored),
+    hour 00-23, minute 00-59, second 00-59, so no implementation ever
+    rolls an impossible date into a different real one.
+    """
+    try:
+        datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        raise ValueError(f"{field_name} is not a valid calendar date-time") from None
+
+
+def _check_surrogates(value: str, field_name: str) -> None:
+    """Reject lone surrogates only (used on the lenient v1 path)."""
+    for ch in value:
+        if 0xD800 <= ord(ch) <= 0xDFFF:
+            raise ValueError(
+                f"{field_name} contains surrogate code point U+{ord(ch):04X}"
+            )
+
+
+def _check_dict_size(d: dict[str, Any]) -> None:
+    """Bound the total string content of a pin dict (§4.3 dict path).
+
+    Counts code points of every string-typed scalar and every `extra`
+    key/value; one code point is at least one byte, so if this count
+    already exceeds the JSON byte cap the pin is oversized without
+    needing to serialize it. Non-string values are rejected by the
+    per-field checks that follow.
+    """
+    total = 0
+    for key, val in d.items():
+        total += len(key)
+        if isinstance(val, str):
+            total += len(val)
+        elif isinstance(val, dict):
+            for k, v in val.items():
+                if isinstance(k, str):
+                    total += len(k)
+                if isinstance(v, str):
+                    total += len(v)
+        if total > MAX_PIN_JSON_BYTES:
+            raise ValueError("pin JSON too large")
 
 
 def _check_nfc(value: str, field_name: str) -> None:
@@ -193,7 +283,7 @@ class PinHeader:
         so non-ASCII NFC code points are emitted as raw UTF-8.
 
         All header fields — including `v` and `kid` — are included.
-        The 14-byte domain tag prevents cross-protocol signature reuse.
+        The 13-byte domain tag prevents cross-protocol signature reuse.
         """
         # NFC every string field at canonicalization time so the bytes
         # match what a fresh-from-spec implementation would emit. We
@@ -269,8 +359,17 @@ class Pin:
                 f"pin contains unknown top-level field(s): {sorted(unknown)}"
             )
 
-        # 2. Version check.
+        # 1b. Total-size guard for the dict path (§4.3). `from_json`
+        # measured the raw bytes already; a dict handed in directly (a
+        # Qdrant payload, a JSONB column) has not been measured, so
+        # bound the string content before any per-field work.
+        _check_dict_size(d)
+
+        # 2. Version check. JSON `2.0` decodes to a float and `true` to a
+        # bool; neither is the integer the spec requires.
         v = d.get("v")
+        if not isinstance(v, int) or isinstance(v, bool):
+            raise ValueError(f"v must be an integer; got {type(v).__name__}")
         allowed = accept_versions if accept_versions is not None else frozenset(
             {PROTOCOL_VERSION}
         )
@@ -279,18 +378,28 @@ class Pin:
                 f"unsupported pin version {v!r}; expected {sorted(allowed)}"
             )
 
-        # 3. String field validation: type, NFC, control chars, bidi.
+        # 3. String field validation: type, size cap, NFC, control
+        #    chars, bidi, surrogates. Caps run first so an oversized
+        #    string never reaches the normalization passes.
         model = d.get("model")
         if not isinstance(model, str) or not model:
             raise ValueError("model must be a non-empty string")
-        _check_string_safe(model, "model")
-        _check_nfc(model, "model")
+        _check_byte_cap(model, MAX_MODEL_BYTES, "model")
+        if v == PROTOCOL_VERSION:
+            _check_string_safe(model, "model")
+            _check_nfc(model, "model")
+        else:
+            _check_surrogates(model, "model")
 
         kid = d.get("kid")
         if not isinstance(kid, str) or not kid:
             raise ValueError("kid must be a non-empty string")
-        _check_string_safe(kid, "kid")
-        _check_nfc(kid, "kid")
+        _check_byte_cap(kid, MAX_KID_BYTES, "kid")
+        if v == PROTOCOL_VERSION:
+            _check_string_safe(kid, "kid")
+            _check_nfc(kid, "kid")
+        else:
+            _check_surrogates(kid, "kid")
 
         vec_dtype = d.get("vec_dtype")
         if vec_dtype not in _ALLOWED_DTYPES:
@@ -332,10 +441,15 @@ class Pin:
                 raise ValueError(
                     "ts must match 'YYYY-MM-DDTHH:MM:SSZ' exactly"
                 )
+            _check_ts_calendar(ts)
             _check_string_safe(ts, "ts")
             _check_nfc(ts, "ts")
+        else:
+            _check_byte_cap(ts, MAX_MODEL_BYTES, "ts")
+            _check_string_safe(ts, "ts")
 
-        # 7. extra: map<string, string>, bounded.
+        # 7. extra: map<string, string>, bounded. `null` is not "absent"
+        # (§4.1): the field is either an object or not present at all.
         extra_raw = d.get("extra", {})
         if not isinstance(extra_raw, dict):
             raise ValueError("extra must be an object")
@@ -362,16 +476,23 @@ class Pin:
                 _check_nfc(k, f"extra key {k!r}")
                 _check_string_safe(val, f"extra[{k!r}]")
                 _check_nfc(val, f"extra[{k!r}]")
+            else:
+                # v1 strings were never scanned; still refuse lone
+                # surrogates so canonicalization cannot raise.
+                _check_surrogates(k, f"extra key {k!r}")
+                _check_surrogates(val, f"extra[{k!r}]")
             extra[k] = val
 
         # 8. Signature.
         sig_raw = d.get("sig")
         if not isinstance(sig_raw, str):
             raise ValueError("sig must be a base64-encoded string")
+        if len(sig_raw) > 4 * SIG_LEN:
+            raise ValueError("sig is too long to be a base64url Ed25519 signature")
         try:
             sig_bytes = _b64dec(sig_raw)
         except (binascii.Error, ValueError) as e:
-            raise ValueError(f"sig is not valid base64: {e}") from e
+            raise ValueError(f"sig is not valid base64url: {e}") from e
         if len(sig_bytes) != SIG_LEN:
             raise ValueError(
                 f"sig must decode to exactly {SIG_LEN} bytes; got {len(sig_bytes)}"
