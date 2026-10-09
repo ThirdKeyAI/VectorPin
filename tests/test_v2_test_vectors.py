@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import base64
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from vectorpin import DOMAIN_TAG, Pin, Verifier, VerifyError
+from vectorpin import DOMAIN_TAG, KeyEntry, Pin, Verifier, VerifyError
 
 V2_VECTORS = Path(__file__).resolve().parent.parent / "testvectors" / "v2.json"
 NEG_V2_VECTORS = Path(__file__).resolve().parent.parent / "testvectors" / "negative_v2.json"
@@ -27,6 +28,14 @@ NEG_V2_VECTORS = Path(__file__).resolve().parent.parent / "testvectors" / "negat
 def _b64dec(s: str) -> bytes:
     pad = "=" * (-len(s) % 4)
     return base64.urlsafe_b64decode(s + pad)
+
+
+def _np_dtype(dtype: str) -> str:
+    return "<f4" if dtype == "f32" else "<f8"
+
+
+def _ts(iso: str) -> datetime:
+    return datetime.strptime(iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
 
 
 @pytest.fixture(scope="module")
@@ -72,19 +81,27 @@ def test_each_positive_fixture_full_verify_with_vector(v2_corpus: dict):
     for fixture in v2_corpus["fixtures"]:
         pin = Pin.from_json(fixture["pin_json"])
         inp = fixture["input"]
-        vec_bytes = _b64dec(inp["vec_b64"])
-        dtype = "<f4" if inp["vec_dtype"] == "f32" else "<f8"
-        vec = np.frombuffer(vec_bytes, dtype=dtype)
+        # `vec_b64` holds the native input bytes; when that is wider than
+        # the pinned dtype the signer cast at sign time, and the verifier
+        # is handed what the store persists (the cast vector).
+        native_dtype = inp.get("vec_native_dtype", inp["vec_dtype"])
+        native = np.frombuffer(_b64dec(inp["vec_b64"]), dtype=_np_dtype(native_dtype))
+        stored = native.astype(_np_dtype(inp["vec_dtype"]))
         result = verifier.verify(
             pin,
             source=inp["source"],
-            vector=vec,
+            vector=stored,
             expected_model=inp["model"],
+            expected_model_hash=inp.get("model_hash"),
         )
         assert result.ok, (
             f"{fixture['name']} full verify: expected OK, got "
             f"{result.error.value}: {result.detail}"
         )
+        if native_dtype != inp["vec_dtype"]:
+            # Widening is refused even for the exact signed input.
+            wide = verifier.verify(pin, vector=native)
+            assert wide.error is VerifyError.SHAPE_MISMATCH, fixture["name"]
 
 
 def test_canonical_bytes_match_expected(v2_corpus: dict):
@@ -127,12 +144,25 @@ def _try_parse(pin_json: str) -> tuple[Pin | None, str | None]:
 
 def test_each_negative_fixture_fails_correctly(neg_corpus: dict):
     pub = _b64dec(neg_corpus["public_key_b64"])
-    verifier = Verifier({neg_corpus["key_id"]: pub})
 
     for fixture in neg_corpus["fixtures"]:
         name = fixture["name"]
         expected_str = fixture["expected_failure"]
         expected_err = _FAIL_MAP[expected_str]
+
+        if "key_valid_from" in fixture or "key_valid_until" in fixture:
+            entry = KeyEntry(
+                public_key=Verifier({neg_corpus["key_id"]: pub}).public_key_for(
+                    neg_corpus["key_id"]
+                ),
+                valid_from=_ts(fixture["key_valid_from"]) if "key_valid_from" in fixture else None,
+                valid_until=(
+                    _ts(fixture["key_valid_until"]) if "key_valid_until" in fixture else None
+                ),
+            )
+            verifier = Verifier({neg_corpus["key_id"]: entry})
+        else:
+            verifier = Verifier({neg_corpus["key_id"]: pub})
 
         # Some fixtures fail at parse, others at verify. We unify by
         # mapping parse failures to VerifyError.PARSE_ERROR.
@@ -154,22 +184,24 @@ def test_each_negative_fixture_fails_correctly(neg_corpus: dict):
             kwargs: dict = {}
             if "tampered_source" in fixture:
                 kwargs["source"] = fixture["tampered_source"]
-            if "tampered_vec_b64" in fixture:
-                vec_bytes = _b64dec(fixture["tampered_vec_b64"])
-                dtype = "<f4" if fixture["vec_dtype"] == "f32" else "<f8"
-                kwargs["vector"] = np.frombuffer(vec_bytes, dtype=dtype)
-            if "nan_vec_b64" in fixture:
-                vec_bytes = _b64dec(fixture["nan_vec_b64"])
-                dtype = "<f4" if fixture["vec_dtype"] == "f32" else "<f8"
-                kwargs["vector"] = np.frombuffer(vec_bytes, dtype=dtype)
+            # `vec_dtype` describes the supplied bytes, which may be wider
+            # than the pin's dtype (the widening fixtures).
+            vec_b64 = fixture.get("tampered_vec_b64") or fixture.get("nan_vec_b64")
+            if vec_b64 is not None:
+                supplied_dtype = fixture.get("vec_dtype", pin.header.vec_dtype)
+                kwargs["vector"] = np.frombuffer(_b64dec(vec_b64), dtype=_np_dtype(supplied_dtype))
             if "expected_model" in fixture:
                 kwargs["expected_model"] = fixture["expected_model"]
+            if "expected_model_hash" in fixture:
+                kwargs["expected_model_hash"] = fixture["expected_model_hash"]
             if "expected_record_id" in fixture:
                 kwargs["expected_record_id"] = fixture["expected_record_id"]
             if "expected_collection_id" in fixture:
                 kwargs["expected_collection_id"] = fixture["expected_collection_id"]
             if "expected_tenant_id" in fixture:
                 kwargs["expected_tenant_id"] = fixture["expected_tenant_id"]
+            if "trusted_time" in fixture:
+                kwargs["trusted_time"] = _ts(fixture["trusted_time"])
 
             result = verifier.verify(pin, **kwargs)
             assert not result.ok, f"{name}: expected failure but got OK"

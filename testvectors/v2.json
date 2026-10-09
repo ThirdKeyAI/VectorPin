@@ -74,6 +74,55 @@
       "expected_canonical_bytes_b64": "dmVjdG9ycGluL3YyAHsiZXh0cmEiOnsicmVnaW9uIjoidXMtd2VzdCIsInZlY3RvcnBpbi5yZWNvcmRfaWQiOiJyZWMtMjAyNi0wNS0wNS0wMDEifSwia2lkIjoidGVzdC12ZWN0b3JzLXYyLTIwMjYtMDUiLCJtb2RlbCI6InVuaWNvZGUtbW9kZWwiLCJzb3VyY2VfaGFzaCI6InNoYTI1Njo4NTBmN2RjNDM5MTBmZjg5MGY4ODc5YzBlZDI2ZmU2OTdjOTNhMDY3YWQ5M2E3ZDUwZjQ2NmE3MDI4YTliZjRlIiwidHMiOiIyMDI2LTA1LTA1VDEyOjAwOjAwWiIsInYiOjIsInZlY19kaW0iOjE2LCJ2ZWNfZHR5cGUiOiJmMzIiLCJ2ZWNfaGFzaCI6InNoYTI1Njo3ODY1OTFhMTk3NWE1Yjk4MTFkZGU0MzdmMDMzOTUwYTFhZWNhYjFmNTQ4NzZhNTVjNDM1MzFhZTI4ODNjNDllIn0",
       "expected_vec_hash": "sha256:786591a1975a5b9811dde437f033950a1aecab1f54876a55c43531ae2883c49e",
       "expected_source_hash": "sha256:850f7dc43910ff890f8879c0ed26fe697c93a067ad93a7d50f466a7028a9bf4e"
+    },
+    {
+      "name": "vector_4_f32_float_edge_cases",
+      "description": "f32 vector of IEEE-754 edge values: +0.0 and -0.0 (distinct), smallest normal and subnormal (positive and negative), f32 max, 1 + ulp. Locks byte-exact encoding with no FTZ/DAZ.",
+      "input": {
+        "source": "f32 edge cases",
+        "model": "test-model-v1",
+        "vec_b64": "AAAAAAAAAIAAAIA_AACAvwAAgAAAAICAAQAAAAEAAID__39___9__wEAgD_NzMw9_-bbLuaxYX_h_38AAgAAgA",
+        "vec_dtype": "f32",
+        "vec_dim": 16,
+        "timestamp": "2026-05-05T12:00:00Z"
+      },
+      "pin_json": "{\"kid\":\"test-vectors-v2-2026-05\",\"model\":\"test-model-v1\",\"sig\":\"dNiR3DWGActQzgSkKOt3BunhHzHNoKlijA7Z1LmoR-Xv69BbnqccShy113QW8i3eDCfdRqFyC7fCcAtMHlYsCg\",\"source_hash\":\"sha256:0223c5eae1039727f75e8660e0a64158b63ad8aa2fd5b5fe4f1e33be16625e8e\",\"ts\":\"2026-05-05T12:00:00Z\",\"v\":2,\"vec_dim\":16,\"vec_dtype\":\"f32\",\"vec_hash\":\"sha256:6d6c5a956c3bd7dc497beef19b947baf949389351159c71357d5ca6a87eb7499\"}",
+      "expected_canonical_bytes_b64": "dmVjdG9ycGluL3YyAHsia2lkIjoidGVzdC12ZWN0b3JzLXYyLTIwMjYtMDUiLCJtb2RlbCI6InRlc3QtbW9kZWwtdjEiLCJzb3VyY2VfaGFzaCI6InNoYTI1NjowMjIzYzVlYWUxMDM5NzI3Zjc1ZTg2NjBlMGE2NDE1OGI2M2FkOGFhMmZkNWI1ZmU0ZjFlMzNiZTE2NjI1ZThlIiwidHMiOiIyMDI2LTA1LTA1VDEyOjAwOjAwWiIsInYiOjIsInZlY19kaW0iOjE2LCJ2ZWNfZHR5cGUiOiJmMzIiLCJ2ZWNfaGFzaCI6InNoYTI1Njo2ZDZjNWE5NTZjM2JkN2RjNDk3YmVlZjE5Yjk0N2JhZjk0OTM4OTM1MTE1OWM3MTM1N2Q1Y2E2YTg3ZWI3NDk5In0",
+      "expected_vec_hash": "sha256:6d6c5a956c3bd7dc497beef19b947baf949389351159c71357d5ca6a87eb7499",
+      "expected_source_hash": "sha256:0223c5eae1039727f75e8660e0a64158b63ad8aa2fd5b5fe4f1e33be16625e8e"
+    },
+    {
+      "name": "vector_5_f64_float_edge_cases",
+      "description": "f64 vector of IEEE-754 edge values: signed zeros, smallest normal and subnormal, f64 max, 1 + ulp, 1e-300.",
+      "input": {
+        "source": "f64 edge cases",
+        "model": "test-model-v1",
+        "vec_b64": "AAAAAAAAAAAAAAAAAAAAgAAAAAAAABAAAQAAAAAAAAABAAAAAAAAgP_______-9_________7_8BAAAAAADwP5qZmZmZmbk_WfP4wh9upQE",
+        "vec_dtype": "f64",
+        "vec_dim": 10,
+        "timestamp": "2026-05-05T12:00:00Z"
+      },
+      "pin_json": "{\"kid\":\"test-vectors-v2-2026-05\",\"model\":\"test-model-v1\",\"sig\":\"QxI-CHFweNeoDKloxYAKvUdsYbJ8u-yLEfcWOcg9lsFoA3cam8FabImFAG_xt4obrkpQiaCg-noIPeifNTHKAQ\",\"source_hash\":\"sha256:0cfb069a3bbc94daec3de7089d89c233669eac6ebcd1477f9b10bd781cfa5ba5\",\"ts\":\"2026-05-05T12:00:00Z\",\"v\":2,\"vec_dim\":10,\"vec_dtype\":\"f64\",\"vec_hash\":\"sha256:03cf76011eca0fa6d998aee8190367ea892e3ccbdef155fde79082f93e7e48ce\"}",
+      "expected_canonical_bytes_b64": "dmVjdG9ycGluL3YyAHsia2lkIjoidGVzdC12ZWN0b3JzLXYyLTIwMjYtMDUiLCJtb2RlbCI6InRlc3QtbW9kZWwtdjEiLCJzb3VyY2VfaGFzaCI6InNoYTI1NjowY2ZiMDY5YTNiYmM5NGRhZWMzZGU3MDg5ZDg5YzIzMzY2OWVhYzZlYmNkMTQ3N2Y5YjEwYmQ3ODFjZmE1YmE1IiwidHMiOiIyMDI2LTA1LTA1VDEyOjAwOjAwWiIsInYiOjIsInZlY19kaW0iOjEwLCJ2ZWNfZHR5cGUiOiJmNjQiLCJ2ZWNfaGFzaCI6InNoYTI1NjowM2NmNzYwMTFlY2EwZmE2ZDk5OGFlZTgxOTAzNjdlYTg5MmUzY2NiZGVmMTU1ZmRlNzkwODJmOTNlN2U0OGNlIn0",
+      "expected_vec_hash": "sha256:03cf76011eca0fa6d998aee8190367ea892e3ccbdef155fde79082f93e7e48ce",
+      "expected_source_hash": "sha256:0cfb069a3bbc94daec3de7089d89c233669eac6ebcd1477f9b10bd781cfa5ba5"
+    },
+    {
+      "name": "vector_6_f64_input_pinned_f32_rne_ties",
+      "description": "f64 input values that are exact ties (and near-ties) between adjacent f32 values, pinned explicitly as f32. Every port must apply round-to-nearest-even when casting at sign time. The input bytes are f64 (vec_native_dtype); verify with the f32 cast.",
+      "input": {
+        "source": "f64 to f32 ties",
+        "model": "test-model-v1",
+        "vec_b64": "AAAAEAAA8D8AAAAwAADwPwAAABAAAPC_ABAAEAAA8D8A8P8PAADwP5qZmZmZmbk_YVUsJM5EYjYAAAAAAACoNgAAAOD__-9HAAAAVDRvnUE",
+        "vec_dtype": "f32",
+        "vec_dim": 10,
+        "timestamp": "2026-05-05T12:00:00Z",
+        "vec_native_dtype": "f64"
+      },
+      "pin_json": "{\"kid\":\"test-vectors-v2-2026-05\",\"model\":\"test-model-v1\",\"sig\":\"FDd9XyHx59tHETPGLg1I6GRZFVU56nZuppgKgGeEIPm5JDkHZbhx3qJSzEcqLKwH5gmFHPrtnQ-SpU8PtS8TAA\",\"source_hash\":\"sha256:4dd5a9295336fe72a5bb706ef019f1e1949a29b5d9561d703bd789ca7fd1bd9b\",\"ts\":\"2026-05-05T12:00:00Z\",\"v\":2,\"vec_dim\":10,\"vec_dtype\":\"f32\",\"vec_hash\":\"sha256:7ca09c2447c16c025cae0d4ae1facb119bf580f471d0a6ac84dfb80b15a0e1e3\"}",
+      "expected_canonical_bytes_b64": "dmVjdG9ycGluL3YyAHsia2lkIjoidGVzdC12ZWN0b3JzLXYyLTIwMjYtMDUiLCJtb2RlbCI6InRlc3QtbW9kZWwtdjEiLCJzb3VyY2VfaGFzaCI6InNoYTI1Njo0ZGQ1YTkyOTUzMzZmZTcyYTViYjcwNmVmMDE5ZjFlMTk0OWEyOWI1ZDk1NjFkNzAzYmQ3ODljYTdmZDFiZDliIiwidHMiOiIyMDI2LTA1LTA1VDEyOjAwOjAwWiIsInYiOjIsInZlY19kaW0iOjEwLCJ2ZWNfZHR5cGUiOiJmMzIiLCJ2ZWNfaGFzaCI6InNoYTI1Njo3Y2EwOWMyNDQ3YzE2YzAyNWNhZTBkNGFlMWZhY2IxMTliZjU4MGY0NzFkMGE2YWM4NGRmYjgwYjE1YTBlMWUzIn0",
+      "expected_vec_hash": "sha256:7ca09c2447c16c025cae0d4ae1facb119bf580f471d0a6ac84dfb80b15a0e1e3",
+      "expected_source_hash": "sha256:4dd5a9295336fe72a5bb706ef019f1e1949a29b5d9561d703bd789ca7fd1bd9b"
     }
   ]
 }

@@ -210,6 +210,138 @@ def build_positive_fixtures(signer: Signer) -> list[dict]:
     f["input"]["extra"] = extra
     fixtures.append(f)
 
+    # 5. f32 float edge cases: signed zeros, subnormals, extremes.
+    #    These are exact in every port; the fixture locks the byte
+    #    encoding (little-endian IEEE-754, -0.0 distinct from +0.0, no
+    #    flush-to-zero) rather than any arithmetic.
+    f32_edges = np.array(
+        [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            np.finfo(np.float32).tiny,  # smallest normal
+            -np.finfo(np.float32).tiny,
+            np.finfo(np.float32).smallest_subnormal,  # 2^-149
+            -np.finfo(np.float32).smallest_subnormal,
+            np.finfo(np.float32).max,
+            -np.finfo(np.float32).max,
+            np.float32(1.0) + np.finfo(np.float32).eps,  # 1 + 2^-23
+            np.float32(0.1),
+            np.float32(1e-10),
+            np.float32(3.0e38),
+            np.float32(1.17549e-38),
+            np.float32(-2.5e-45),
+        ],
+        dtype=np.float32,
+    )
+    pin = signer.pin(
+        source="f32 edge cases",
+        model="test-model-v1",
+        vector=f32_edges,
+        vec_dtype="f32",
+        timestamp=FIXED_TS,
+    )
+    fixtures.append(
+        _fixture(
+            name="vector_4_f32_float_edge_cases",
+            description=(
+                "f32 vector of IEEE-754 edge values: +0.0 and -0.0 (distinct), "
+                "smallest normal and subnormal (positive and negative), f32 max, "
+                "1 + ulp. Locks byte-exact encoding with no FTZ/DAZ."
+            ),
+            source="f32 edge cases",
+            model="test-model-v1",
+            vec=f32_edges,
+            dtype="f32",
+            pin=pin,
+        )
+    )
+
+    # 6. f64 float edge cases.
+    f64_edges = np.array(
+        [
+            0.0,
+            -0.0,
+            np.finfo(np.float64).tiny,
+            np.finfo(np.float64).smallest_subnormal,  # 2^-1074
+            -np.finfo(np.float64).smallest_subnormal,
+            np.finfo(np.float64).max,
+            -np.finfo(np.float64).max,
+            1.0 + np.finfo(np.float64).eps,
+            0.1,
+            1e-300,
+        ],
+        dtype=np.float64,
+    )
+    pin = signer.pin(
+        source="f64 edge cases",
+        model="test-model-v1",
+        vector=f64_edges,
+        vec_dtype="f64",
+        timestamp=FIXED_TS,
+    )
+    fixtures.append(
+        _fixture(
+            name="vector_5_f64_float_edge_cases",
+            description=(
+                "f64 vector of IEEE-754 edge values: signed zeros, smallest "
+                "normal and subnormal, f64 max, 1 + ulp, 1e-300."
+            ),
+            source="f64 edge cases",
+            model="test-model-v1",
+            vec=f64_edges,
+            dtype="f64",
+            pin=pin,
+        )
+    )
+
+    # 7. f64 input pinned explicitly as f32 — exercises the sign-time
+    #    cast, including exact round-to-nearest-even ties. The fixture
+    #    carries the f64 input bytes (`vec_native_dtype: "f64"`); ports
+    #    sign from the f64 input and verify with the f32 the store would
+    #    persist (verifying with the f64 input itself is a SHAPE_MISMATCH
+    #    after the precision-widening rule).
+    ties = np.array(
+        [
+            1.0 + 2.0**-24,  # exact tie between 1.0 and 1+2^-23 -> rounds to 1.0 (even)
+            1.0 + 3 * 2.0**-24,  # tie between 1+2^-23 and 1+2^-22 -> rounds up (even)
+            -(1.0 + 2.0**-24),
+            1.0 + 2.0**-24 + 2.0**-40,  # just above the tie -> rounds up
+            1.0 + 2.0**-24 - 2.0**-40,  # just below the tie -> rounds down
+            0.1,  # not representable; nearest f32
+            1e-46,  # below f32 subnormal range -> rounds to 0 or min subnormal
+            2.0**-149 * 1.5,  # tie between two subnormals
+            float(np.finfo(np.float32).max),  # f32 max, exactly representable
+            123456789.0,  # integer not representable in f32
+        ],
+        dtype=np.float64,
+    )
+    pin = signer.pin(
+        source="f64 to f32 ties",
+        model="test-model-v1",
+        vector=ties,
+        vec_dtype="f32",
+        timestamp=FIXED_TS,
+    )
+    f = _fixture(
+        name="vector_6_f64_input_pinned_f32_rne_ties",
+        description=(
+            "f64 input values that are exact ties (and near-ties) between "
+            "adjacent f32 values, pinned explicitly as f32. Every port must "
+            "apply round-to-nearest-even when casting at sign time. The "
+            "input bytes are f64 (vec_native_dtype); verify with the f32 cast."
+        ),
+        source="f64 to f32 ties",
+        model="test-model-v1",
+        vec=ties,
+        dtype="f32",
+        pin=pin,
+    )
+    f["input"]["vec_b64"] = b64url(vec_canonical_bytes(ties, "f64"))
+    f["input"]["vec_native_dtype"] = "f64"
+    fixtures.append(f)
+
     return fixtures
 
 
@@ -445,7 +577,252 @@ def build_negative_fixtures(signer: Signer, base_pin: Pin, base_vec: np.ndarray)
         pin_json=json.dumps(q_dict, sort_keys=True, separators=(",", ":")),
     )
 
+    def _compact(d: dict) -> str:
+        return json.dumps(d, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+    # r. Precision widening: f64 bytes supplied against an f32 pin, with
+    #    the low 28 mantissa bits of every element rewritten so the f32
+    #    rounding is unchanged. Before the widening rule this verified OK
+    #    (the covert channel); it is now rejected as SHAPE_MISMATCH.
+    base_f64 = base_vec.astype(np.float64)
+    bits = base_f64.view(np.uint64).copy()
+    payload = np.random.default_rng(7).integers(1, 1 << 28, size=bits.shape[0], dtype=np.uint64)
+    bits = (bits & ~np.uint64((1 << 28) - 1)) | payload
+    smuggled = bits.view(np.float64)
+    assert np.array_equal(smuggled.astype(np.float32), base_vec), "rounding must be preserved"
+    assert not np.array_equal(smuggled, base_f64)
+    _emit(
+        "widened_f64_low_bit_perturbation",
+        description=(
+            "f64 vector supplied against an f32 pin; every element's low 28 "
+            "mantissa bits differ from the signed values while the f32 rounding "
+            "is unchanged. Verifiers MUST refuse the wider representation "
+            "(SHAPE_MISMATCH) rather than cast and accept."
+        ),
+        expected_failure="SHAPE_MISMATCH",
+        pin_json=base_json,
+        tampered_vec_b64=b64url(vec_canonical_bytes(smuggled, "f64")),
+        vec_dtype="f64",
+        vec_dim=int(base_vec.shape[0]),
+    )
+
+    # s. Precision widening with f32-exact f64 values: still refused, the
+    #    verifier cannot know which bits a store may have changed.
+    _emit(
+        "widened_f64_exact_values",
+        description=(
+            "f64 vector holding exactly the signed f32 values, supplied "
+            "against an f32 pin. Still SHAPE_MISMATCH: widening is refused "
+            "regardless of the values."
+        ),
+        expected_failure="SHAPE_MISMATCH",
+        pin_json=base_json,
+        tampered_vec_b64=b64url(vec_canonical_bytes(base_f64, "f64")),
+        vec_dtype="f64",
+        vec_dim=int(base_vec.shape[0]),
+    )
+
+    # t. Truncated vector -> SHAPE_MISMATCH on dim.
+    _emit(
+        "shape_mismatch_truncated_vector",
+        description="Supplied vector has 8 elements; the pin commits to 16.",
+        expected_failure="SHAPE_MISMATCH",
+        pin_json=base_json,
+        tampered_vec_b64=b64url(vec_canonical_bytes(base_vec[:8], "f32")),
+        vec_dtype="f32",
+        vec_dim=8,
+    )
+
+    # u. Padded base64url signature.
+    u_dict = copy.deepcopy(base_dict)
+    u_dict["sig"] = u_dict["sig"] + "=="
+    _emit(
+        "sig_padded_base64",
+        description="sig carries '=' padding; §2 requires URL-safe base64 without padding.",
+        expected_failure="PARSE_ERROR",
+        pin_json=_compact(u_dict),
+    )
+
+    # v. Non-canonical trailing bits in sig (last symbol encodes bits
+    #    beyond the 64th byte that must be zero).
+    v_dict = copy.deepcopy(base_dict)
+    last = v_dict["sig"][-1]
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    v_dict["sig"] = v_dict["sig"][:-1] + alphabet[(alphabet.index(last) | 0x1)]
+    assert v_dict["sig"] != base_dict["sig"]
+    _emit(
+        "sig_noncanonical_trailing_bits",
+        description=(
+            "sig's final base64url symbol sets padding bits that must be zero; "
+            "the string is not the canonical encoding of any 64-byte value."
+        ),
+        expected_failure="PARSE_ERROR",
+        pin_json=_compact(v_dict),
+    )
+
+    # w. Calendar-invalid timestamps that match the §4.1 regex.
+    for name, ts in (
+        ("ts_day_zero", "2026-03-00T12:00:00Z"),
+        ("ts_month_13", "2026-13-05T12:00:00Z"),
+        ("ts_february_30", "2026-02-30T12:00:00Z"),
+        ("ts_hour_24", "2026-05-05T24:00:00Z"),
+    ):
+        w_dict = copy.deepcopy(base_dict)
+        w_dict["ts"] = ts
+        _emit(
+            name,
+            description=(
+                f"ts {ts!r} matches the digit pattern but is not a real UTC "
+                "instant; every port rejects it at parse time instead of "
+                "rolling it into a different date."
+            ),
+            expected_failure="PARSE_ERROR",
+            pin_json=_compact(w_dict),
+        )
+
+    # x. Lone surrogate in a string field. json.dumps escapes it as
+    #    \ud800 so the fixture file stays valid UTF-8.
+    x_dict = copy.deepcopy(base_dict)
+    x_dict["model"] = "test-model\ud800"
+    _emit(
+        "lone_surrogate_in_model",
+        description=(
+            "model contains a lone UTF-16 surrogate (escaped as \\ud800 in the "
+            "JSON). It has no UTF-8 encoding and therefore no canonical bytes; "
+            "parsers MUST reject it rather than crash or substitute U+FFFD."
+        ),
+        expected_failure="PARSE_ERROR",
+        pin_json=json.dumps(x_dict, sort_keys=True, separators=(",", ":")),
+    )
+
+    # y. Non-integer version literal.
+    y_json = _compact(base_dict).replace('"v":2', '"v":2.0')
+    assert '"v":2.0' in y_json
+    _emit(
+        "v_non_integer_literal",
+        description="v is the JSON number 2.0; §4.1 requires an integer.",
+        expected_failure="PARSE_ERROR",
+        pin_json=y_json,
+    )
+
+    # z. extra: null.
+    z_dict = copy.deepcopy(base_dict)
+    z_dict["extra"] = None
+    _emit(
+        "extra_null",
+        description="extra is JSON null; §4.1 allows only an object or absence.",
+        expected_failure="PARSE_ERROR",
+        pin_json=_compact(z_dict),
+    )
+
+    # aa. Oversize model under the 64 KiB total but over the per-field cap.
+    aa_dict = copy.deepcopy(base_dict)
+    aa_dict["model"] = "m" * 2000
+    _emit(
+        "model_exceeds_field_cap",
+        description="model is 2000 bytes; §4.3 caps model at 1024 bytes.",
+        expected_failure="PARSE_ERROR",
+        pin_json=_compact(aa_dict),
+    )
+
+    # ab. Oversize kid.
+    ab_dict = copy.deepcopy(base_dict)
+    ab_dict["kid"] = "k" * 300
+    _emit(
+        "kid_exceeds_field_cap",
+        description="kid is 300 bytes; §4.3 caps kid at 256 bytes.",
+        expected_failure="PARSE_ERROR",
+        pin_json=_compact(ab_dict),
+    )
+
+    # ac. model_hash mismatch against an expectation.
+    mh_pin = signer.pin(
+        source="hello world",
+        model="test-model-v1",
+        vector=base_vec,
+        vec_dtype="f32",
+        model_hash="sha256:" + "a" * 64,
+        timestamp=FIXED_TS,
+    )
+    _emit(
+        "model_hash_mismatch",
+        description="Pin commits to one model_hash; the caller expects another.",
+        expected_failure="MODEL_MISMATCH",
+        pin_json=mh_pin.to_json(),
+        expected_model_hash="sha256:" + "b" * 64,
+    )
+    _emit(
+        "model_hash_missing_when_expected",
+        description="Pin has no model_hash but the caller requires one.",
+        expected_failure="MODEL_MISMATCH",
+        pin_json=base_json,
+        expected_model_hash="sha256:" + "a" * 64,
+    )
+
+    # ad. Collection / tenant replay bindings.
+    ct_pin = signer.pin(
+        source="hello world",
+        model="test-model-v1",
+        vector=base_vec,
+        vec_dtype="f32",
+        timestamp=FIXED_TS,
+        extra={"vectorpin.collection_id": "col-A", "vectorpin.tenant_id": "ten-1"},
+    )
+    _emit(
+        "collection_id_mismatch",
+        description="Pin commits to vectorpin.collection_id=col-A; caller expects col-B.",
+        expected_failure="COLLECTION_MISMATCH",
+        pin_json=ct_pin.to_json(),
+        expected_collection_id="col-B",
+    )
+    _emit(
+        "tenant_id_mismatch",
+        description="Pin commits to vectorpin.tenant_id=ten-1; caller expects ten-2.",
+        expected_failure="TENANT_MISMATCH",
+        pin_json=ct_pin.to_json(),
+        expected_tenant_id="ten-2",
+    )
+
+    # ae. Key validity window: pin ts after valid_until.
+    _emit(
+        "key_expired_ts_after_valid_until",
+        description=(
+            "Registry entry has valid_until=2026-01-01; the pin's ts is "
+            "2026-05-05, so the key was already retired."
+        ),
+        expected_failure="KEY_EXPIRED",
+        pin_json=base_json,
+        key_valid_until="2026-01-01T00:00:00Z",
+    )
+
+    # af. Backdated forgery caught by a trusted ingestion time.
+    _emit(
+        "key_expired_backdated_ts_with_trusted_time",
+        description=(
+            "Registry entry has valid_until=2026-06-01 and the pin's ts "
+            "(2026-05-05) sits inside the window, but the caller supplies a "
+            "trusted ingestion time of 2026-07-01: the window is evaluated "
+            "against the trusted clock, so a backdated pin is rejected."
+        ),
+        expected_failure="KEY_EXPIRED",
+        pin_json=base_json,
+        key_valid_until="2026-06-01T00:00:00Z",
+        trusted_time="2026-07-01T00:00:00Z",
+    )
+
     return fixtures
+
+
+def _self_check(fixtures: list[dict]) -> None:
+    """Every positive fixture's recorded vec_hash must match a cast of its
+    native input to the pinned dtype — the contract the ports rely on."""
+    from vectorpin import hash_vector
+
+    for f in fixtures:
+        inp = f["input"]
+        native = inp.get("vec_native_dtype", inp["vec_dtype"])
+        arr = np.frombuffer(b64url_dec(inp["vec_b64"]), dtype="<f4" if native == "f32" else "<f8")
+        assert hash_vector(arr, inp["vec_dtype"]) == f["expected_vec_hash"], f["name"]
 
 
 def main() -> None:
@@ -454,6 +831,7 @@ def main() -> None:
 
     # ---- positive fixtures ----
     fixtures = build_positive_fixtures(signer)
+    _self_check(fixtures)
 
     out = {
         "version": PROTOCOL_VERSION,

@@ -22,9 +22,9 @@ import {
   pinFromJSON,
   pinToJSON,
 } from '../src/attestation.js';
-import { hashText, hashVector, type VecDtype } from '../src/hash.js';
+import { hashText, hashVector, type VecDtype, type VectorInput } from '../src/hash.js';
 import { Signer } from '../src/signer.js';
-import { Verifier, VerifyErrorCode } from '../src/verifier.js';
+import { Verifier, VerifyErrorCode, type KeyRegistration } from '../src/verifier.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TESTVECTORS_DIR = join(HERE, '..', '..', 'testvectors');
@@ -46,6 +46,8 @@ interface V2Fixture {
     model: string;
     vec_b64: string;
     vec_dtype: VecDtype;
+    /** dtype of the bytes in `vec_b64` when it differs from the pinned dtype. */
+    vec_native_dtype?: VecDtype;
     vec_dim: number;
     timestamp: string;
     model_hash?: string;
@@ -77,7 +79,13 @@ interface V2NegativeFixture {
   vec_dim?: number;
   nan_vec_b64?: string;
   expected_model?: string;
+  expected_model_hash?: string;
   expected_record_id?: string;
+  expected_collection_id?: string;
+  expected_tenant_id?: string;
+  key_valid_from?: string;
+  key_valid_until?: string;
+  trusted_time?: string;
 }
 
 function loadV2(): V2Bundle {
@@ -110,6 +118,15 @@ function parseVecF64(bytes: Uint8Array, dim: number): Float64Array {
   return out;
 }
 
+function parseVec(bytes: Uint8Array, dtype: VecDtype, dim: number): Float32Array | Float64Array {
+  return dtype === 'f32' ? parseVecF32(bytes, dim) : parseVecF64(bytes, dim);
+}
+
+/** Cast to `dtype` the way a store that persists `dtype` would. */
+function castVec(v: VectorInput, dtype: VecDtype): Float32Array | Float64Array {
+  return dtype === 'f32' ? new Float32Array(v) : new Float64Array(v);
+}
+
 describe('cross-language v2 positive fixtures (testvectors/v2.json)', () => {
   const bundle = loadV2();
   assert.equal(bundle.version, 2, 'fixture file declares v2');
@@ -118,15 +135,17 @@ describe('cross-language v2 positive fixtures (testvectors/v2.json)', () => {
   for (const fx of bundle.fixtures) {
     it(`fixture: ${fx.name}`, async () => {
       const dtype = fx.input.vec_dtype;
+      const nativeDtype = fx.input.vec_native_dtype ?? dtype;
       const rawBytes = b64UrlDecodeNoPad(fx.input.vec_b64);
-      const vector =
-        dtype === 'f32'
-          ? parseVecF32(rawBytes, fx.input.vec_dim)
-          : parseVecF64(rawBytes, fx.input.vec_dim);
+      // The signer is handed the native-dtype input (and casts if the pin
+      // dtype differs); the verifier is handed what the store persists.
+      const vector = parseVec(rawBytes, nativeDtype, fx.input.vec_dim);
+      const stored = castVec(vector, dtype);
 
       // 1. Component hashes line up with what Python recorded.
       assert.equal(hashText(fx.input.source), fx.expected_source_hash, 'source_hash');
-      assert.equal(hashVector(vector, dtype), fx.expected_vec_hash, 'vec_hash');
+      assert.equal(hashVector(vector, dtype), fx.expected_vec_hash, 'vec_hash (native input)');
+      assert.equal(hashVector(stored, dtype), fx.expected_vec_hash, 'vec_hash (stored dtype)');
 
       // 2. Reproduce the pin from the deterministic seed and confirm
       //    the canonical bytes + signed JSON match Python's output
@@ -161,15 +180,22 @@ describe('cross-language v2 positive fixtures (testvectors/v2.json)', () => {
       const producedJson = pinToJSON(pin);
       assert.equal(producedJson, fx.pin_json, 'pin JSON byte-for-byte');
 
-      // 3. Round-trip through pinFromJSON; verify the parsed pin.
+      // 3. Round-trip through pinFromJSON; verify the parsed pin with
+      //    the vector the store would persist.
       const parsed = pinFromJSON(producedJson);
       const verifier = new Verifier({ [bundle.key_id]: pubExpected });
-      const r1 = await verifier.verify(parsed, { source: fx.input.source });
+      const full = {
+        source: fx.input.source,
+        vector: stored,
+        expectedModel: fx.input.model,
+        ...(fx.input.model_hash !== undefined ? { expectedModelHash: fx.input.model_hash } : {}),
+      };
+      const r1 = await verifier.verify(parsed, full);
       assert.equal(r1.ok, true, `parsed pin verify: ${r1.error} ${r1.detail}`);
 
       // 4. Verify the JSON Python emitted directly.
       const pythonPin = pinFromJSON(fx.pin_json);
-      const r2 = await verifier.verify(pythonPin, { source: fx.input.source });
+      const r2 = await verifier.verify(pythonPin, full);
       assert.equal(r2.ok, true, `python pin verify: ${r2.error} ${r2.detail}`);
     });
   }
@@ -208,7 +234,15 @@ describe('cross-language v2 negative fixtures (testvectors/negative_v2.json)', (
         return;
       }
 
-      const verifier = new Verifier({ [bundle.key_id]: pubKey });
+      let registration: KeyRegistration = pubKey;
+      if (fx.key_valid_from !== undefined || fx.key_valid_until !== undefined) {
+        registration = {
+          publicKey: pubKey,
+          ...(fx.key_valid_from !== undefined ? { validFrom: new Date(fx.key_valid_from) } : {}),
+          ...(fx.key_valid_until !== undefined ? { validUntil: new Date(fx.key_valid_until) } : {}),
+        };
+      }
+      const verifier = new Verifier({ [bundle.key_id]: registration });
 
       // Build verify options from optional fixture fields.
       const opts: Parameters<Verifier['verify']>[1] = {};
@@ -218,18 +252,27 @@ describe('cross-language v2 negative fixtures (testvectors/negative_v2.json)', (
       if (fx.expected_model !== undefined) {
         opts.expectedModel = fx.expected_model;
       }
+      if (fx.expected_model_hash !== undefined) {
+        opts.expectedModelHash = fx.expected_model_hash;
+      }
       if (fx.expected_record_id !== undefined) {
         opts.expectedRecordId = fx.expected_record_id;
       }
-      if (fx.tampered_vec_b64 !== undefined && fx.vec_dtype && fx.vec_dim !== undefined) {
-        const bytes = b64UrlDecodeNoPad(fx.tampered_vec_b64);
-        opts.vector =
-          fx.vec_dtype === 'f32' ? parseVecF32(bytes, fx.vec_dim) : parseVecF64(bytes, fx.vec_dim);
+      if (fx.expected_collection_id !== undefined) {
+        opts.expectedCollectionId = fx.expected_collection_id;
       }
-      if (fx.nan_vec_b64 !== undefined && fx.vec_dtype && fx.vec_dim !== undefined) {
-        const bytes = b64UrlDecodeNoPad(fx.nan_vec_b64);
-        opts.vector =
-          fx.vec_dtype === 'f32' ? parseVecF32(bytes, fx.vec_dim) : parseVecF64(bytes, fx.vec_dim);
+      if (fx.expected_tenant_id !== undefined) {
+        opts.expectedTenantId = fx.expected_tenant_id;
+      }
+      if (fx.trusted_time !== undefined) {
+        opts.trustedTime = new Date(fx.trusted_time);
+      }
+      // The supplied bytes are in the fixture's `vec_dtype`, which may be
+      // wider than the pin's (the widening fixtures).
+      const suppliedDtype: VecDtype = fx.vec_dtype ?? pin!.header.vec_dtype;
+      const vecB64 = fx.tampered_vec_b64 ?? fx.nan_vec_b64;
+      if (vecB64 !== undefined && fx.vec_dim !== undefined) {
+        opts.vector = parseVec(b64UrlDecodeNoPad(vecB64), suppliedDtype, fx.vec_dim);
       }
 
       const result = await verifier.verify(pin!, opts);
