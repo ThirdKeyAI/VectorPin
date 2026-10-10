@@ -16,7 +16,14 @@ import {
   type Pin,
   type PinHeader,
 } from './attestation.js';
-import { hashText, hashVector, type VecDtype, type VectorInput } from './hash.js';
+import {
+  assertNoLoneSurrogates,
+  hashText,
+  hashVector,
+  nativeDtype,
+  type VecDtype,
+  type VectorInput,
+} from './hash.js';
 
 // Hard requirement: a Web-Crypto-compatible CSPRNG must be available
 // at module load. Every supported runtime (Node >=20, Deno, Bun,
@@ -33,7 +40,16 @@ export interface SignerPinOptions {
   model: string;
   /** 1-D embedding. */
   vector: VectorInput;
-  /** Canonical dtype to hash under. Defaults to 'f32'. */
+  /**
+   * Canonical dtype to hash under. Defaults to the input's native
+   * dtype: `'f32'` for a `Float32Array`, `'f64'` for a `Float64Array`
+   * or a plain `number[]` (JavaScript numbers are doubles), so no
+   * precision is silently discarded. Pin under the dtype your store
+   * persists — verifiers refuse a stored vector wider than the pinned
+   * dtype, and a narrower one will not hash equal. Pass `'f32'`
+   * explicitly to commit a 64-bit input to its single-precision
+   * rounding when the store is f32.
+   */
   vecDtype?: VecDtype;
   /** Optional content hash of the model weights. */
   modelHash?: string;
@@ -138,12 +154,24 @@ export class Signer {
       }
     }
 
-    const dtype: VecDtype = opts.vecDtype ?? 'f32';
+    const dtype: VecDtype = opts.vecDtype ?? nativeDtype(opts.vector);
+    if (dtype !== 'f32' && dtype !== 'f64') {
+      throw new Error(`unsupported vecDtype ${JSON.stringify(dtype)}`);
+    }
 
     // NFC + safety for every string-typed input.
     const modelN = normalizeStringStrict(opts.model, 'model');
+    if (modelN.length === 0) {
+      throw new Error('model must be a non-empty string');
+    }
     // Source is hashed; NFC happens inside hashText already, but we
-    // still want a stable representation here.
+    // still want a stable representation here. A lone surrogate has no
+    // UTF-8 form and therefore no hash — refuse rather than emit a pin
+    // no other implementation can reproduce.
+    if (typeof opts.source !== 'string') {
+      throw new Error('source must be a string');
+    }
+    assertNoLoneSurrogates(opts.source, 'source');
     const sourceN = opts.source.normalize('NFC');
 
     const extraN: Record<string, string> | undefined = (() => {
@@ -195,6 +223,7 @@ function normalizeStringStrict(value: string, fieldName: string): string {
   if (typeof value !== 'string') {
     throw new Error(`${fieldName} must be a string`);
   }
+  assertNoLoneSurrogates(value, fieldName);
   const nfc = value.normalize('NFC');
   for (let i = 0; i < nfc.length; i++) {
     const cp = nfc.charCodeAt(i);

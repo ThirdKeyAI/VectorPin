@@ -127,7 +127,7 @@ If `v != 2` (or `v != 1` in legacy mode if explicitly enabled), return `UNSUPPOR
 
 If `kid` is not in the verifier's registry, return `UNKNOWN_KEY`.
 
-If `kid` is registered but `ts` falls outside the entry's `(valid_from, valid_until)` window, return `KEY_EXPIRED`. This is how revocation works in v2 — see [Key Rotation](#key-rotation-and-revocation).
+If `kid` is registered but `ts` falls outside the entry's `(valid_from, valid_until)` window, return `KEY_EXPIRED`. This is how revocation works in v2 — see [Key Rotation](#key-rotation-and-revocation). When the caller supplies a trusted time (`trusted_time` / `trustedTime`), the window is evaluated against it instead of `ts`, and a pin whose `ts` postdates it is `KEY_EXPIRED`.
 
 ### 3. Structural validation
 
@@ -146,8 +146,9 @@ If the caller supplied a ground-truth source string, recompute `hash_text(source
 If the caller supplied a ground-truth vector:
 
 1. Compare its shape to `vec_dim`. On mismatch, return `SHAPE_MISMATCH`.
-2. Reject if the vector contains `NaN`/`Inf`, returning `PARSE_ERROR`.
-3. Recompute `hash_vector(vector, vec_dtype)` and compare to `vec_hash`. On mismatch, return `VECTOR_TAMPERED`.
+2. Refuse it if its native element width is greater than that of `vec_dtype` (a 64-bit vector against an `f32` pin), returning `SHAPE_MISMATCH` — never cast a wider vector before hashing (spec §3.2).
+3. Reject if the vector contains `NaN`/`Inf`, returning `PARSE_ERROR`.
+4. Recompute `hash_vector(vector, vec_dtype)` and compare to `vec_hash`. On mismatch, return `VECTOR_TAMPERED`.
 
 ### 7. Model check
 
@@ -177,7 +178,9 @@ Old pins continue to verify against the old key as long as their `ts` falls with
 
 ### Revocation (compromise)
 
-If a private key is compromised — as opposed to merely rotated — set `valid_until` on the `kid` entry to the latest moment the key is believed to have been uncompromised. Pins with `ts` after that instant return `KEY_EXPIRED`; pins with `ts` before it continue to verify. Historical pins stay valid; anything an attacker could forge post-compromise is rejected.
+If a private key is compromised — as opposed to merely rotated — set `valid_until` on the `kid` entry to the latest moment the key is believed to have been uncompromised. Pins with `ts` after that instant return `KEY_EXPIRED`; pins with `ts` before it continue to verify. Historical pins stay valid.
+
+Because `ts` is chosen by the signer, an attacker holding the compromised key can backdate it into the window; the window alone only bounds honest signers. To reject post-compromise forgeries, supply a trusted time from a clock the key holder cannot write — the store's ingestion timestamp — via `trusted_time` / `trustedTime` / `VerifyOptions::trusted_time`. See spec §7.
 
 Pair this with a transparency-log entry (e.g., sigstore Rekor) for the revocation event itself, so downstream verifiers can detect a malicious registry rollback.
 
@@ -220,7 +223,7 @@ Concretely, this means:
 | `OK` | Everything checks out. | Proceed. |
 | `UNSUPPORTED_VERSION` | `v` is not in this verifier's set. | Upgrade verifier, or re-pin under v2. |
 | `UNKNOWN_KEY` | `kid` is not in the registry. | Misconfiguration — add the key. |
-| `KEY_EXPIRED` | `ts` is outside the registered `(valid_from, valid_until)`. | Rotation / revocation working as intended. |
+| `KEY_EXPIRED` | `ts` (or the trusted time, when supplied) is outside the registered `(valid_from, valid_until)`, or `ts` postdates the trusted time. | Rotation / revocation working as intended. |
 | `PARSE_ERROR` | Oversized pin, unknown top-level field, non-string `extra` value, malformed timestamp, non-NFC string, `NaN`/`Inf` in vector. | Reject the pin; likely hostile or buggy producer. |
 | `SIGNATURE_INVALID` | Pin forged, signed with the wrong key, or canonicalization differs. | **Security incident.** |
 | `VECTOR_TAMPERED` | Stored vector differs from the one originally pinned. | **Security incident.** Likely steganography or DB compromise. |

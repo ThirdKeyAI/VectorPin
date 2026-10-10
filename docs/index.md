@@ -47,7 +47,7 @@ if not result.ok:
 | **Rust** | `vectorpin` | `cargo add vectorpin` |
 | **TypeScript** | `vectorpin` | `npm install vectorpin` |
 
-All three are byte-for-byte compatible — a pin produced by any implementation verifies on the other two. The TS port is pure JavaScript via `@noble/ed25519` and `@noble/hashes`, so it also runs in Deno, Bun, and edge runtimes.
+All three are byte-for-byte compatible — a pin produced by any implementation verifies on the other two, and each port's cross-language tests run in CI. The TS port is pure JavaScript via `@noble/ed25519` and `@noble/hashes` with no dependency on Node's `Buffer`, so it also runs in Deno, Bun, and edge runtimes.
 
 ## Why this matters
 
@@ -55,7 +55,7 @@ Modern RAG systems convert sensitive content into high-dimensional vectors and s
 
 The companion [VectorSmuggle](https://github.com/jaschadub/VectorSmuggle) research project demonstrates that an attacker with write access to a vector pipeline can hide arbitrary data inside embeddings using noise injection, rotation, scaling, offset perturbations, cross-model fragmentation, and steganographic encoding that survives quantization.
 
-Cryptographic pinning is the kill shot. Every steganographic technique requires modifying the vector after the model produces it. If each vector ships with a signed attestation binding it to source text and producing model, any modification breaks the signature.
+Cryptographic pinning is the kill shot. Every steganographic technique requires modifying the vector after the model produces it. If each vector ships with a signed attestation binding it to source text and producing model, any modification made after signing to the stored vector — in the precision the store persists — breaks verification. The protected interval begins at signing, and verification covers the stored vector in its native dtype, not quantized index copies; see [Security](security.md#threat-model).
 
 ## Documentation
 

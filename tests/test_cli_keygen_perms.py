@@ -65,3 +65,49 @@ def test_keygen_refuses_to_overwrite_existing_private_key(tmp_path: Path) -> Non
     # Second invocation must raise (not silently clobber).
     with pytest.raises(FileExistsError):
         _run_cli(["keygen", "--key-id", "dup", "--output", str(tmp_path)])
+
+
+def test_pin_warns_on_world_readable_private_key(tmp_path: Path, monkeypatch) -> None:
+    """A group/world-readable .priv file prints a warning to stderr."""
+    import json as _json
+
+    import numpy as np
+
+    from vectorpin import Signer
+
+    monkeypatch.delenv("VECTORPIN_QUIET_KEY_PERMS", raising=False)
+    signer = Signer.generate(key_id="k")
+    priv = tmp_path / "k.priv"
+    priv.write_bytes(signer.private_key_bytes())
+    os.chmod(priv, 0o644)
+    src = tmp_path / "src.txt"
+    src.write_text("hello")
+    vec = tmp_path / "v.json"
+    vec.write_text(_json.dumps([0.1, 0.2, 0.3]))
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        args = build_parser().parse_args(
+            [
+                "pin",
+                "--private-key",
+                str(priv),
+                "--key-id",
+                "k",
+                "--model",
+                "m",
+                "--source",
+                str(src),
+                "--vector",
+                str(vec),
+            ]
+        )
+        assert args.func(args) == 0
+    assert "readable by group/other" in err.getvalue()
+    assert _json.loads(out.getvalue())["vec_dtype"] == "f32"
+    assert np is not None
+
+    os.chmod(priv, 0o600)
+    err2 = io.StringIO()
+    with redirect_stdout(io.StringIO()), redirect_stderr(err2):
+        args.func(args)
+    assert "readable by group/other" not in err2.getvalue()

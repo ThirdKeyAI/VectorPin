@@ -213,7 +213,9 @@ FAIL [record_mismatch] expected record_id "doc-123", pin attests "doc-456"
 
 ### Vector dtype confusion
 
-If you sign with `f32` but verify with the same array cast to `f64`, the hashes differ. The pin's `vec_dtype` is authoritative — verifiers cast the supplied vector to that dtype before hashing. Make sure your storage and your signing path agree on the dtype.
+The pin's `vec_dtype` is the dtype the signer committed to, and the verifier compares the stored vector *in its native precision* against it. Verifiers never narrow a wider vector before hashing: a `float64` array (or, in TypeScript, a `Float64Array` / plain `number[]`) supplied against an `f32` pin is rejected as `SHAPE_MISMATCH` with a "wider than pinned vec_dtype" detail, because the bits a cast discards would be an unverified channel for hidden data. A narrower array (`float32` against an `f64` pin) widens exactly but will not hash-match unless the signer's values were already representable in that precision; the `VECTOR_TAMPERED` detail then names the dtype you should pin under.
+
+Rule of thumb: **pin under the dtype your store persists.** Signers default to the input array's native dtype, so if an embedding API hands you 64-bit floats and your store persists 32-bit, pass `vec_dtype="f32"` (`vecDtype: 'f32'`, `PinOptions { dtype: Some(VecDtype::F32) }`) explicitly. Adapters report the store's native dtype (LanceDB and pgvector read it from the schema; Chroma, Qdrant and Pinecone persist single precision), so the audit sees exactly what the store holds.
 
 ---
 
@@ -231,9 +233,25 @@ If you sign with `f32` but verify with the same array cast to `f64`, the hashes 
 
 ### Qdrant: pin not visible in payload
 
-**Problem:** Pins were attached, but `audit-qdrant` reports them as `unpinned`.
+**Problem:** Pins were attached, but `audit-qdrant` reports them as `unpinned` (and fails the run).
 
 **Cause:** The pin is stored under `payload["vectorpin"]`. If your write path uses `set_payload` with a partial dict, ensure the dict actually includes that key.
+
+### `FAIL <id> [unpinned]` / audit exits 1 on a partial backfill
+
+**Problem:** The audit fails on records that have no pin yet.
+
+**Cause:** Unpinned records fail closed by default: an attacker who can rewrite a vector can delete its pin just as easily, so "no pin" is not treated as "nothing to check". An empty or whitespace-only pin field is always a `parse_error`, never "unpinned".
+
+**Solution:** During a deliberate backfill pass `--allow-unpinned`; remove it once the corpus is fully pinned. Pair the audit with a signed collection manifest (`--write-manifest` right after ingestion, `--manifest` on every audit) so deleted or inserted records are caught too.
+
+### `FAIL <id> [record_mismatch]` on records that were never copied
+
+**Problem:** Pins carry `vectorpin.record_id` values that do not equal the id column the adapter iterates.
+
+**Cause:** The audit enforces `vectorpin.record_id == record id` by default (that is what defeats pin-shuffle replay). If your pipeline bound a different identifier than the store's primary key, every record mismatches.
+
+**Solution:** Re-pin with the store's record id, or pass `--no-record-id-check` while you migrate (this disables replay detection across records).
 
 ---
 

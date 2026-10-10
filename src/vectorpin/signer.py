@@ -28,13 +28,14 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 from vectorpin.attestation import (
+    DOMAIN_TAG,
     PROTOCOL_VERSION,
     Pin,
     PinHeader,
     _check_nfc,
     _check_string_safe,
 )
-from vectorpin.hash import CanonicalDtype, hash_text, hash_vector
+from vectorpin.hash import CanonicalDtype, hash_text, hash_vector, native_dtype
 
 
 def _normalize_str(value: str, field_name: str) -> str:
@@ -129,13 +130,24 @@ class Signer:
             encryption_algorithm=serialization.NoEncryption(),
         )
 
+    def _sign_with_domain(self, domain_tag: bytes, payload: bytes) -> bytes:
+        """Sign ``domain_tag || payload`` for a sibling VectorPin message type.
+
+        Package-internal: used by the collection manifest and the signed
+        audit summary. The domain tag MUST differ from the pin tag so a
+        signature over one message type can never be replayed as another.
+        """
+        if not domain_tag or domain_tag == DOMAIN_TAG:
+            raise ValueError("domain_tag must be non-empty and distinct from the pin tag")
+        return self._private_key.sign(domain_tag + payload)
+
     def pin(
         self,
         source: str,
         model: str,
         vector: np.ndarray,
         *,
-        vec_dtype: CanonicalDtype = "f32",
+        vec_dtype: CanonicalDtype | None = None,
         model_hash: str | None = None,
         timestamp: datetime | None = None,
         extra: dict[str, str] | None = None,
@@ -143,8 +155,9 @@ class Signer:
         """Create a Pin for (source, model, vector).
 
         Per §3.2, vectors containing NaN, +inf, or -inf are rejected at
-        sign time. Per §3.1, every string-typed input is NFC-normalized
-        and checked for control characters and bidi overrides.
+        sign time, as are empty vectors. Per §3.1, every string-typed
+        input is NFC-normalized and checked for control characters,
+        bidi overrides, and lone surrogates.
 
         Args:
             source: The exact source text the embedding was produced from.
@@ -153,7 +166,14 @@ class Signer:
             model: Embedding model identifier, e.g. 'text-embedding-3-large'.
                 Treat as opaque — the verifier just compares strings.
             vector: 1-D numpy array, the embedding itself.
-            vec_dtype: Canonical dtype to hash under. Default 'f32'.
+            vec_dtype: Canonical dtype to hash under. Default: the
+                array's native dtype (``float32`` -> ``'f32'``,
+                ``float64`` -> ``'f64'``), so no precision is silently
+                discarded. Pin under the dtype your store persists:
+                verifiers refuse a stored vector wider than the pinned
+                dtype, and a narrower one will not hash equal. Pass
+                ``'f32'`` explicitly to commit a ``float64`` input to
+                its single-precision rounding when the store is f32.
             model_hash: Optional content hash of the model weights, if
                 pinning to a specific local model file.
             timestamp: Optional explicit timestamp. Default: now (UTC).
@@ -164,13 +184,21 @@ class Signer:
             A signed Pin. Serialize with `pin.to_json()` and store
             alongside the vector in the DB metadata.
         """
+        if not isinstance(vector, np.ndarray):
+            raise TypeError(f"vector must be a numpy array; got {type(vector).__name__}")
+        if vector.ndim != 1:
+            raise ValueError(f"expected 1-D vector, got shape {vector.shape}")
+        if vector.shape[0] == 0:
+            raise ValueError("vector is empty; refusing to sign")
+        if vec_dtype is None:
+            vec_dtype = native_dtype(vector)
+        elif vec_dtype not in ("f32", "f64"):
+            raise ValueError(f"unsupported canonical dtype: {vec_dtype!r}")
         # Reject NaN / Inf at sign time so a signer never commits to a
         # vector value with ambiguous hash semantics. The cast to the
         # canonical dtype happens here too so we catch overflows that
         # would silently become +inf in f32.
         target = np.dtype("<f4") if vec_dtype == "f32" else np.dtype("<f8")
-        if vector.ndim != 1:
-            raise ValueError(f"expected 1-D vector, got shape {vector.shape}")
         cast = vector.astype(target, copy=False)
         if not np.isfinite(cast).all():
             raise ValueError(
@@ -189,6 +217,8 @@ class Signer:
         # tolerant here: if a caller passes an NFD string we silently
         # NFC it, but we still reject control chars and bidi overrides.
         model_norm = _normalize_str(model, "model")
+        if not model_norm:
+            raise ValueError("model must be a non-empty string")
         source_norm = unicodedata.normalize("NFC", source)
 
         extra_norm: dict[str, str] = {}

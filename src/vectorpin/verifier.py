@@ -23,6 +23,13 @@ Failure modes, in rough order of severity:
 The Verifier returns a structured VerificationResult so callers can
 distinguish these and route them differently (alert vs. quarantine vs.
 re-pin).
+
+Contract: ``Verifier.verify`` never raises on account of pin content or
+the supplied ground truth. Any exception escaping the checks is mapped
+to ``PARSE_ERROR`` so a hostile or corrupt record cannot turn a read
+path into an exception path. Only verifier *configuration* errors (for
+example a naive datetime in a ``KeyEntry``) raise, and they raise at
+construction time, never from ``verify``.
 """
 
 from __future__ import annotations
@@ -40,7 +47,7 @@ from vectorpin.attestation import (
     Pin,
     _canonicalize_v1,
 )
-from vectorpin.hash import hash_text, hash_vector
+from vectorpin.hash import hash_text, hash_vector, is_wider_than, native_dtype
 
 
 class VerifyError(Enum):
@@ -73,6 +80,24 @@ class VerificationResult:
         return self.ok
 
 
+def _require_aware(value: datetime | None, field_name: str) -> None:
+    """Reject naive datetimes in verifier configuration.
+
+    Pin timestamps parse to timezone-aware UTC datetimes; comparing them
+    against a naive datetime raises ``TypeError`` deep inside
+    ``verify()``. Catching that at construction keeps the read path
+    exception-free and makes the misconfiguration obvious.
+    """
+    if value is None:
+        return
+    if not isinstance(value, datetime):
+        raise TypeError(f"{field_name} must be a datetime or None")
+    if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+        raise ValueError(
+            f"{field_name} must be timezone-aware (use tzinfo=timezone.utc)"
+        )
+
+
 @dataclass(frozen=True)
 class KeyEntry:
     """A registered public key, with an optional validity window (§7).
@@ -80,11 +105,18 @@ class KeyEntry:
     `valid_from` / `valid_until` are inclusive of `valid_from` and
     exclusive of `valid_until` per common convention. If both are None,
     the key validates pins of any `ts`.
+
+    Both bounds MUST be timezone-aware datetimes; naive values are
+    rejected at construction.
     """
 
     public_key: Ed25519PublicKey
     valid_from: datetime | None = None
     valid_until: datetime | None = None
+
+    def __post_init__(self) -> None:
+        _require_aware(self.valid_from, "valid_from")
+        _require_aware(self.valid_until, "valid_until")
 
 
 def _public_key_from_bytes(raw: bytes) -> Ed25519PublicKey:
@@ -179,6 +211,15 @@ class Verifier:
             )
         self._keys[kid] = entry
 
+    def public_key_for(self, kid: str) -> Ed25519PublicKey | None:
+        """Registered public key for ``kid``, or ``None`` if unknown.
+
+        Used by sibling message types (collection manifests, signed
+        audit summaries) that share the pin key registry.
+        """
+        entry = self._keys.get(kid)
+        return entry.public_key if entry is not None else None
+
     def _canonical_for(self, pin: Pin) -> bytes:
         """Reconstruct the canonical bytes a signer would have signed.
 
@@ -197,9 +238,11 @@ class Verifier:
         source: str | None = None,
         vector: np.ndarray | None = None,
         expected_model: str | None = None,
+        expected_model_hash: str | None = None,
         expected_record_id: str | None = None,
         expected_collection_id: str | None = None,
         expected_tenant_id: str | None = None,
+        trusted_time: datetime | None = None,
     ) -> VerificationResult:
         """Verify a Pin against optional ground-truth source/vector.
 
@@ -208,13 +251,64 @@ class Verifier:
         partial verification (e.g. signature-only when the source text
         is unavailable but the producer identity still matters).
 
+        ``vector`` MUST be a floating-point array whose element width is
+        no wider than the pin's ``vec_dtype``. A wider array (for
+        example ``float64`` against an ``f32`` pin) is rejected as
+        ``SHAPE_MISMATCH`` rather than cast: casting before hashing would
+        leave every low-order bit the cast discards unverified (§3.2).
+
+        ``expected_model_hash`` compares against the pin's optional
+        ``model_hash``; a pin without one fails ``MODEL_MISMATCH``.
+
         Replay-protection identifiers (§5 step 8): if any of
         ``expected_record_id``, ``expected_collection_id``, or
         ``expected_tenant_id`` is supplied, the verifier compares it
         against the value at ``vectorpin.record_id`` /
         ``vectorpin.collection_id`` / ``vectorpin.tenant_id`` in the
         pin's ``extra`` map. A missing or mismatched value rejects.
+
+        ``trusted_time`` is a timezone-aware instant from a clock the
+        signing-key holder cannot write (for example the store's own
+        ingestion timestamp). When supplied, the key validity window is
+        evaluated against it instead of the signer-chosen ``ts``, and a
+        pin whose ``ts`` postdates it is rejected. Without it, the
+        window only bounds honest signers (§7).
+
+        This method never raises on account of pin content; unexpected
+        exceptions are reported as ``PARSE_ERROR``.
         """
+        try:
+            return self._verify_inner(
+                pin,
+                source=source,
+                vector=vector,
+                expected_model=expected_model,
+                expected_model_hash=expected_model_hash,
+                expected_record_id=expected_record_id,
+                expected_collection_id=expected_collection_id,
+                expected_tenant_id=expected_tenant_id,
+                trusted_time=trusted_time,
+            )
+        except Exception as e:  # never-raise contract
+            return VerificationResult(
+                False,
+                VerifyError.PARSE_ERROR,
+                f"verification aborted on malformed input: {type(e).__name__}: {e}",
+            )
+
+    def _verify_inner(
+        self,
+        pin: Pin,
+        *,
+        source: str | None,
+        vector: np.ndarray | None,
+        expected_model: str | None,
+        expected_model_hash: str | None,
+        expected_record_id: str | None,
+        expected_collection_id: str | None,
+        expected_tenant_id: str | None,
+        trusted_time: datetime | None,
+    ) -> VerificationResult:
         # Step 1: version dispatch.
         accepted = self._accepted_versions
         if self._accept_v1_legacy:
@@ -248,7 +342,14 @@ class Verifier:
                 f"no registered public key for kid={pin.kid!r}",
             )
 
-        if entry.valid_from is not None or entry.valid_until is not None:
+        if trusted_time is not None:
+            _require_aware(trusted_time, "trusted_time")
+
+        if (
+            entry.valid_from is not None
+            or entry.valid_until is not None
+            or trusted_time is not None
+        ):
             pin_ts = _parse_ts(pin.header.ts)
             if pin_ts is None:
                 return VerificationResult(
@@ -256,13 +357,27 @@ class Verifier:
                     VerifyError.KEY_EXPIRED,
                     "pin ts unparseable; cannot evaluate key validity window",
                 )
-            if entry.valid_from is not None and pin_ts < entry.valid_from:
+            # The instant the window is evaluated at. `ts` is chosen by
+            # whoever holds the signing key, so on its own it only bounds
+            # honest signers; a caller-supplied trusted time binds the
+            # window to a clock the key holder cannot write.
+            window_ts = pin_ts
+            if trusted_time is not None:
+                if pin_ts > trusted_time:
+                    return VerificationResult(
+                        False,
+                        VerifyError.KEY_EXPIRED,
+                        f"pin ts {pin.header.ts} postdates the trusted time "
+                        f"{trusted_time.isoformat()}",
+                    )
+                window_ts = trusted_time
+            if entry.valid_from is not None and window_ts < entry.valid_from:
                 return VerificationResult(
                     False,
                     VerifyError.KEY_EXPIRED,
                     f"pin ts {pin.header.ts} predates key valid_from",
                 )
-            if entry.valid_until is not None and pin_ts >= entry.valid_until:
+            if entry.valid_until is not None and window_ts >= entry.valid_until:
                 return VerificationResult(
                     False,
                     VerifyError.KEY_EXPIRED,
@@ -279,14 +394,49 @@ class Verifier:
                 "ed25519 signature did not verify",
             )
 
+        # Step 5: source check.
+        if source is not None:
+            try:
+                source_hash = hash_text(source)
+            except ValueError as e:
+                return VerificationResult(
+                    False,
+                    VerifyError.PARSE_ERROR,
+                    f"supplied source cannot be hashed: {e}",
+                )
+            if source_hash != pin.header.source_hash:
+                return VerificationResult(
+                    False,
+                    VerifyError.SOURCE_MISMATCH,
+                    "source hash mismatch — pinned source differs from supplied source",
+                )
+
         # Step 6: vector check. Vector NaN/Inf at verify time is a
         # parse error per §5 step 6 — reject before hashing.
         if vector is not None:
+            if not isinstance(vector, np.ndarray):
+                return VerificationResult(
+                    False,
+                    VerifyError.SHAPE_MISMATCH,
+                    f"vector must be a numpy array; got {type(vector).__name__}",
+                )
             if vector.ndim != 1 or vector.shape[0] != pin.header.vec_dim:
                 return VerificationResult(
                     False,
                     VerifyError.SHAPE_MISMATCH,
                     f"vector shape {vector.shape} does not match pin (dim={pin.header.vec_dim})",
+                )
+            # Precision check (§3.2): the supplied array must not hold
+            # more bits than the pinned dtype. Casting first would make
+            # every value that rounds to the same pinned value verify
+            # identically, leaving the discarded bits as a covert channel.
+            if is_wider_than(vector, pin.header.vec_dtype):
+                return VerificationResult(
+                    False,
+                    VerifyError.SHAPE_MISMATCH,
+                    f"supplied vector dtype {vector.dtype} is wider than pinned "
+                    f"vec_dtype {pin.header.vec_dtype!r}; low-order bits would be "
+                    "unverified. Pin under the dtype your store persists.",
                 )
             if not np.isfinite(vector).all():
                 return VerificationResult(
@@ -295,19 +445,15 @@ class Verifier:
                     "supplied vector contains NaN or infinity",
                 )
             if hash_vector(vector, pin.header.vec_dtype) != pin.header.vec_hash:
-                return VerificationResult(
-                    False,
-                    VerifyError.VECTOR_TAMPERED,
-                    "vector hash mismatch — embedding has been modified after pinning",
-                )
-
-        # Step 5: source check.
-        if source is not None and hash_text(source) != pin.header.source_hash:
-            return VerificationResult(
-                False,
-                VerifyError.SOURCE_MISMATCH,
-                "source hash mismatch — pinned source differs from supplied source",
-            )
+                detail = "vector hash mismatch — embedding has been modified after pinning"
+                supplied = native_dtype(vector)
+                if supplied != pin.header.vec_dtype:
+                    detail += (
+                        f" (supplied vector is {supplied} but the pin was signed as "
+                        f"{pin.header.vec_dtype}; if your store persists {supplied}, "
+                        f"pin with vec_dtype={supplied!r})"
+                    )
+                return VerificationResult(False, VerifyError.VECTOR_TAMPERED, detail)
 
         # Step 7: model check.
         if expected_model is not None and pin.header.model != expected_model:
@@ -315,6 +461,13 @@ class Verifier:
                 False,
                 VerifyError.MODEL_MISMATCH,
                 f"pin model {pin.header.model!r} != expected {expected_model!r}",
+            )
+        if expected_model_hash is not None and pin.header.model_hash != expected_model_hash:
+            return VerificationResult(
+                False,
+                VerifyError.MODEL_MISMATCH,
+                f"pin model_hash {pin.header.model_hash!r} != expected "
+                f"{expected_model_hash!r}",
             )
 
         # Step 8: replay-protection identifier checks. Reserved

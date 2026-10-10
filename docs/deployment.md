@@ -18,7 +18,9 @@ text + model ─┐                                              ┌─ verifier
    KMS / file ┘                                                 (per record)
 ```
 
-The pin is produced once at ingestion (where the private key lives) and verified continuously at read or audit time (where only the public key lives). This asymmetry is the whole point — verifiers need no secret material.
+The pin is produced once at ingestion (where the private key lives) and verified at read time (adapter read wrappers) and at audit time (where only the public key lives). This asymmetry is the whole point — verifiers need no secret material.
+
+**Where the signer sits is the security boundary.** The protected interval begins at signing: a writer upstream of the signing call, or one that can invoke the signer with arbitrary input, obtains legitimately signed pins. Co-locating the signer with the ingestion pipeline — as the diagram above shows for simplicity — means a compromise of that pipeline is a compromise of the key. Production deployments SHOULD run the signer as a separate service or KMS-backed endpoint that the pipeline calls with `(source, model, vector)`, with rate limits and an append-only log of every signing call, so that a pipeline writer cannot sign arbitrarily and every signature is attributable. Nothing in VectorPin fingerprints the producing model: `model` is a label and `model_hash` is whatever the signer wrote, so bind the weights hash at the signing service and require it with `--expected-model-hash` at verification.
 
 ---
 
@@ -181,15 +183,46 @@ jobs:
             --source-column text
 ```
 
-### Treating unpinned records as failures
+### Unpinned records fail closed
 
-By default, `unpinned` records do not fail the run (they're useful during partial backfills). To fail closed:
+Unpinned records fail the run by default: an attacker who can rewrite a vector can delete its pin just as easily, so "no pin" is treated the same as "bad pin", and an empty or whitespace-only pin field is always a `parse_error`. Each failing record is printed as `FAIL <id> [unpinned]` on stderr. During a deliberate backfill, opt in with `--allow-unpinned` and remove the flag once the corpus is fully pinned.
+
+### Committing to the record set: signed manifests
+
+Per-record pins cannot see a deleted record or an inserted unpinned one. Right after ingestion, write a signed manifest (record count plus a Merkle root over `record_id → vec_hash`) and keep it somewhere the database administrator cannot rewrite — object storage with a separate credential, a CI artifact, a transparency log:
 
 ```bash
-summary=$(vectorpin audit-lancedb --uri ... --table ... --public-key ... --key-id ...)
-echo "$summary"
-echo "$summary" | python -c "import json,sys; sys.exit(1 if json.load(sys.stdin)['unpinned'] else 0)"
+vectorpin audit-lancedb --uri ... --table rag-corpus --public-key ./keys/prod.pub --key-id prod \
+  --write-manifest s3-synced/rag-corpus.manifest.json \
+  --manifest-key ./keys/prod.priv --manifest-key-id prod
 ```
+
+Pipelines can also build it in-process with `vectorpin.build_manifest(signer, collection_id, entries)`. Every subsequent audit checks the store against it:
+
+```bash
+vectorpin audit-lancedb --uri ... --table rag-corpus --public-key ./keys/prod.pub --key-id prod \
+  --manifest s3-synced/rag-corpus.manifest.json
+```
+
+A count or Merkle-root mismatch is reported as `FAIL <manifest> [count_mismatch|root_mismatch]` and fails the run.
+
+### Signing the audit report
+
+A host that controls both the database and the audit job could forge a clean summary. Sign the summary with a key the audit host holds (`--sign-summary-key ./keys/audit.priv --sign-summary-key-id audit`) and check it wherever the report is consumed:
+
+```bash
+vectorpin verify-summary --public-key ./keys/audit.pub --key-id audit --summary report.json
+```
+
+Run the audit from a host the DB administrator does not control.
+
+### Binding records, collections, tenants, and the model
+
+`vectorpin.record_id` is enforced automatically whenever a pin carries it (`--no-record-id-check` disables). Pass `--collection-id` and `--tenant-id` to require every pin to carry those bindings, and `--expected-model` / `--expected-model-hash` to require the model identifier and weights hash.
+
+### Making revocation effective
+
+`valid_until` is compared against the signer-chosen `ts`, so on its own it only stops honest use of a retired key. Record an ingestion timestamp the signer cannot write (a database default `created_at`) and pass it as `trusted_time` when verifying from your own code; see [Security](security.md#revocation-and-trusted-time).
 
 ---
 

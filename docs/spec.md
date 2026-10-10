@@ -56,11 +56,13 @@ hash_vector(v, dtype) := "sha256:" || hex(SHA-256(canonical_bytes(v, dtype)))
 
 Where `canonical_bytes` produces:
 
-1. The vector cast to the specified dtype (`f32` or `f64`).
+1. The vector represented in the specified dtype (`f32` or `f64`). At sign time a signer MAY cast a wider input to the declared dtype (round-to-nearest-even); the pin then commits to the cast values and the store MUST persist exactly those values in that dtype.
 2. Stored in little-endian byte order.
 3. Packed contiguously, 1-D.
 
 Implementations MUST reject vectors containing NaN, positive infinity, or negative infinity at sign time. `-0.0` and `+0.0` are distinct values and both valid; FTZ/DAZ floating-point modes MUST be disabled or vectors normalized before hashing.
+
+**Precision rule (verify time).** The commitment is to the stored representation, not to a rounding of it. A verifier MUST refuse to hash a supplied vector whose native element width is greater than the width of `vec_dtype` (for example a 64-bit vector against an `f32` pin), reporting `SHAPE_MISMATCH` (or an implementation-specific equivalent) without casting. Casting first would make every value that rounds to the same `vec_dtype` value verify identically, leaving the discarded low-order bits — about 29 per element for f64 under f32 — as an unverified covert channel in any store that persists the wider type. A supplied vector narrower than `vec_dtype` MAY be widened (the widening is exact) but will only verify if the signed values were representable at that width. Adapters MUST hand the verifier the dtype the store persists, never a coerced one. Signers SHOULD default `vec_dtype` to the input's native dtype; operators SHOULD pin under the dtype their store persists.
 
 Other dtypes are reserved for future protocol versions.
 
@@ -72,17 +74,17 @@ A Pin is a JSON object with the following fields. **No other top-level fields ar
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `v` | integer | yes | Protocol version. Must equal `2`. |
+| `v` | integer | yes | Protocol version. Must equal `2`. MUST be a JSON integer literal in minimal form: `2.0`, `2e0`, `true`, or a value outside the 32-bit unsigned range MUST be rejected (never truncated). |
 | `kid` | string | yes | Identifier of the signing key. |
 | `model` | string | yes | Embedding model identifier. |
-| `model_hash` | string | no | Optional content hash of the model weights. When present, MUST match `"sha256:" || hex(SHA-256(weights))` where the input is the concatenation of model weight shards in sorted filename order. Implementations that cannot meet this convention MUST omit the field. |
+| `model_hash` | string | no | Optional content hash of the model weights. When present, MUST equal `"sha256:" || hex(SHA-256(bytes(shard_1) || bytes(shard_2) || ...))` where the shards are every weight file of the model (e.g. `*.safetensors`, `*.bin`, `*.gguf`), ordered by their base filename in ASCII byte order (not locale order), each contributed as its raw on-disk bytes. Tokenizer and configuration files are excluded. A single-file model is the hash of that file. The Python reference implements this as `vectorpin.hash_files(paths)`. Implementations that cannot meet this convention MUST omit the field. The value is only as trustworthy as the signer that wrote it: verifiers that need to bind a specific model MUST compare it against an expectation (§5 step 7). |
 | `source_hash` | string | yes | Hash of the source text (§3.1). |
 | `vec_hash` | string | yes | Hash of the embedding (§3.2). |
 | `vec_dtype` | string | yes | One of `"f32"` or `"f64"`. |
 | `vec_dim` | integer | yes | Embedding dimensionality. Must be a positive integer ≤ 1,048,576. |
-| `ts` | string | yes | UTC timestamp matching exactly the pattern `^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$`. No fractional seconds, no timezone offsets, no lowercase `t`/`z`. |
-| `extra` | object | no | Map of UTF-8 string keys to UTF-8 string values. Values that are not strings MUST cause a parse error. Reserved keys: see §8. |
-| `sig` | string | yes | Ed25519 signature, URL-safe base64 with no padding. Decoded length MUST be exactly 64 bytes. |
+| `ts` | string | yes | UTC timestamp matching exactly the pattern `^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$`. No fractional seconds, no timezone offsets, no lowercase `t`/`z`. The value MUST also denote a real proleptic-Gregorian UTC instant: month `01`–`12`, day `01` through the length of that month (leap years honored), hour `00`–`23`, minute `00`–`59`, second `00`–`59`. Implementations MUST reject a regex-shaped but impossible value such as `2026-02-30T00:00:00Z` at parse time rather than rolling it into a different date. |
+| `extra` | object | no | Map of UTF-8 string keys to UTF-8 string values. Values that are not strings MUST cause a parse error. `null` is not "absent": the field is either an object or not present at all. Reserved keys: see §8. |
+| `sig` | string | yes | Ed25519 signature, URL-safe base64 with no padding. Decoded length MUST be exactly 64 bytes. Parsers MUST accept only the canonical encoding: the URL-safe alphabet (`A–Z a–z 0–9 - _`), no `=` padding, no characters from the standard alphabet, and zero-valued trailing bits in the final symbol. |
 
 ### 4.2 Canonicalization for signing
 
@@ -104,9 +106,9 @@ The `sig` field is excluded from the signed bytes. **Every other field, includin
 - `extra`, if present, with its keys sorted by the same rule. `extra` MUST be omitted if empty.
 - `model_hash` omitted entirely if not set.
 - Integers serialized in their minimal JSON form (no leading zeros, no exponent notation).
-- Strings emit the JSON-standard escapes (`\"`, `\\`, `\b`, `\f`, `\n`, `\r`, `\t`, `\uXXXX` for U+0000–U+001F and U+007F). All other characters MUST be emitted as raw UTF-8 bytes (not as `\u` escapes). Non-ASCII NFC code points are emitted directly.
+- Strings emit the JSON-standard escapes (`\"`, `\\`, `\b`, `\f`, `\n`, `\r`, `\t`, `\uXXXX` for U+0000–U+001F only). All other characters, including U+007F, MUST be emitted as raw UTF-8 bytes (not as `\u` escapes). Non-ASCII NFC code points are emitted directly. (Control characters are rejected by §3.1 before canonicalization, so in practice no `\uXXXX` escape ever appears in a conforming pin's canonical bytes.)
 
-The 14-byte domain tag is prepended to `canonical_json(header)` and the concatenation is fed to Ed25519 signing. Verifiers reconstruct the same bytes from the parsed pin.
+The 13-byte domain tag is prepended to `canonical_json(header)` and the concatenation is fed to Ed25519 signing. Verifiers reconstruct the same bytes from the parsed pin.
 
 ### 4.3 Size limits
 
@@ -120,8 +122,10 @@ To bound parser resource consumption and prevent DoS through hostile pins, confo
 | Any `extra` value, UTF-8 byte length | 1 KiB (1,024 bytes) |
 | `vec_dim` | 1,048,576 (2^20) |
 | `sig`, decoded byte length | exactly 64 (Ed25519 signature) |
+| `kid`, UTF-8 byte length | 256 bytes |
+| `model`, UTF-8 byte length | 1 KiB (1,024 bytes) |
 
-Verifiers MUST reject oversized pins before parsing the signature.
+Verifiers MUST reject oversized pins before parsing the signature. The per-field caps MUST be applied before NFC normalization and the control-character scan, and they MUST apply on every parse path — including implementations that accept an already-decoded object (a database JSONB value or a client payload) rather than JSON text, which the total-size cap does not reach.
 
 ### 4.4 Example
 
@@ -139,7 +143,7 @@ Verifiers MUST reject oversized pins before parsing the signature.
 }
 ```
 
-The canonical bytes for this pin (excluding `sig`) begin with the 14-byte `vectorpin/v2\x00` tag, followed by `{"kid":"prod-2026-05","model":"text-embedding-3-large","source_hash":"sha256:...","ts":"2026-05-05T12:00:00Z","v":2,"vec_dim":3072,"vec_dtype":"f32","vec_hash":"sha256:..."}`.
+The canonical bytes for this pin (excluding `sig`) begin with the 13-byte `vectorpin/v2\x00` tag, followed by `{"kid":"prod-2026-05","model":"text-embedding-3-large","source_hash":"sha256:...","ts":"2026-05-05T12:00:00Z","v":2,"vec_dim":3072,"vec_dtype":"f32","vec_hash":"sha256:..."}`.
 
 ## 5. Verification
 
@@ -148,12 +152,14 @@ A verifier MUST, in order:
 0. Reject pins whose serialized JSON exceeds the size limits in §4.3 before parsing.
 1. Reject pins whose `v` field is unknown to it. A strict v2 verifier rejects any `v != 2`. A migration-mode verifier MAY dispatch `v == 1` pins to a legacy v1 verifier; legacy mode MUST be opt-in and SHOULD be disabled by default.
 2. Reject pins whose `kid` is not in its key registry, OR whose registry entry's `(valid_from, valid_until)` window excludes `ts` (see §7).
-3. Reject pins containing unknown top-level fields, non-string `extra` values, or any string field that is not in NFC form.
+3. Reject pins containing unknown top-level fields, non-string `extra` values, lone surrogate code points, calendar-invalid `ts`, over-cap string fields, or any string field that is not in NFC form.
 4. Reconstruct the canonical byte sequence (§4.2) — including the domain tag — and verify `sig` against the registered public key for `kid`.
 5. If a ground-truth source string was supplied, recompute `hash_text(source)` and compare to `source_hash`.
-6. If a ground-truth vector was supplied, recompute `hash_vector(vector, vec_dtype)` and compare to `vec_hash`. Also check that the supplied vector's shape matches `vec_dim`. The vector MUST contain no NaN/Inf — if it does, reject before hashing.
-7. If an expected model identifier was supplied, compare to `model`.
+6. If a ground-truth vector was supplied: check that its shape matches `vec_dim`; refuse it if its native element width exceeds that of `vec_dtype` (§3.2 precision rule) — never cast first; reject it if it contains NaN/Inf; then recompute `hash_vector(vector, vec_dtype)` and compare to `vec_hash`.
+7. If an expected model identifier was supplied, compare to `model`. If an expected `model_hash` was supplied, the pin MUST carry an equal `model_hash`; a pin without one fails.
 8. If the caller supplied an expected `vectorpin.record_id` / `vectorpin.collection_id` / `vectorpin.tenant_id`, the verifier MUST compare against the value in `extra` and reject on mismatch.
+
+A verifier MUST NOT raise or throw on account of pin content or supplied ground truth: every outcome, including an internal failure while evaluating a hostile record, MUST be returned as a structured result (at worst `PARSE_ERROR`) so that a read path can never be turned into an exception path. Configuration errors (for example a malformed registry entry) MAY raise, but only at configuration time.
 
 Verifiers MUST distinguish at least these failure modes (the reference implementations use the names below; other implementations MAY use different names but MUST distinguish the cases):
 
@@ -164,8 +170,8 @@ Verifiers MUST distinguish at least these failure modes (the reference implement
 - `SIGNATURE_INVALID`
 - `VECTOR_TAMPERED`
 - `SOURCE_MISMATCH`
-- `MODEL_MISMATCH`
-- `SHAPE_MISMATCH`
+- `MODEL_MISMATCH` — `model` or `model_hash` differs from the caller's expectation.
+- `SHAPE_MISMATCH` — dimension mismatch, or a supplied vector wider than `vec_dtype` (§3.2 precision rule; an implementation MAY use a distinct name for the widening case, as the Rust reference does with `PrecisionWidening`).
 - `RECORD_MISMATCH` / `COLLECTION_MISMATCH` / `TENANT_MISMATCH`
 
 ## 6. Storage conventions
@@ -186,7 +192,11 @@ Old pins continue to verify against the old public key as long as their `ts` fal
 
 ### Revocation distinct from rotation
 
-If a private key is **compromised** (as opposed to merely rotated for hygiene), the corresponding `kid` entry MUST be marked with `valid_until` set to the latest moment the key is believed to have been uncompromised. Pins with `ts` after that instant return `KEY_EXPIRED`; pins with `ts` before it continue to verify. This preserves the integrity of historical pins while immediately invalidating anything an attacker could produce post-compromise.
+If a private key is **compromised** (as opposed to merely rotated for hygiene), the corresponding `kid` entry MUST be marked with `valid_until` set to the latest moment the key is believed to have been uncompromised. Pins with `ts` after that instant return `KEY_EXPIRED`; pins with `ts` before it continue to verify. This preserves the integrity of historical pins.
+
+**Limitation.** `ts` is written by the signer and is under the signature, so the only party who can set it is whoever holds the key — including the attacker this mechanism exists to stop. A post-compromise forgery whose `ts` is backdated to before `valid_until` verifies. On its own, the window therefore bounds *honest* signers (it stops a legitimately rotated-out key from being used by mistake); it does not, by itself, invalidate what an attacker produces after compromise.
+
+To close that gap a verifier MUST obtain the evaluation instant from a clock the key holder cannot write. The reference implementations expose this as a caller-supplied trusted time (`trusted_time` / `trustedTime` / `VerifyOptions::trusted_time`), intended to carry the store's own ingestion timestamp, a database-side `created_at` the signer cannot set, or a timestamp-authority countersignature. When it is supplied the window is evaluated against that instant instead of `ts`, and a pin whose `ts` postdates it is rejected (`KEY_EXPIRED`) because no honest signer can sign a record after it was ingested. Deployments that need revocation to be effective against a compromised key MUST record such a time at ingestion and supply it at verification.
 
 Operators SHOULD pair this with a transparency-log entry (e.g., sigstore Rekor or a project-specific append-only log) for the revocation event itself, so that downstream verifiers can detect a malicious registry rollback.
 
@@ -209,7 +219,10 @@ A future v3 may promote these to required top-level fields. The current v2 desig
 ## 9. Security considerations
 
 - **Replay**: Pins are not bound to a specific record id at the wire format level. An attacker who copies a pin from one record to another can pass verification only if the vector and source they paste alongside match the pin. Implementations that need stronger replay protection SHOULD use the reserved `vectorpin.collection_id` / `vectorpin.record_id` / `vectorpin.tenant_id` keys defined in §8, and verifiers MUST enforce them when the caller supplies an expected value (§5 step 8).
-- **Time**: The `ts` field is informational *for the pin* but load-bearing for revocation: verifiers MUST consult `(valid_from, valid_until)` on the `kid` registration (§7) and reject pins whose `ts` falls outside that window.
+- **Time**: The `ts` field is informational *for the pin* but load-bearing for revocation: verifiers MUST consult `(valid_from, valid_until)` on the `kid` registration (§7) and reject pins whose `ts` falls outside that window. Because `ts` is signer-chosen, revocation is only effective against a compromised key when the window is evaluated against a verifier-trusted time (§7).
+- **Precision**: A verifier that casts a wider stored vector to `vec_dtype` before hashing accepts any modification confined to the discarded bits. Verifiers MUST refuse wider vectors (§3.2) and adapters MUST surface the store's native dtype.
+- **Set integrity**: Pins attest to records, not to the set of records. Deletion of a pinned record, insertion of an unpinned one, and blanking of a pin field change no signature. Verification drivers SHOULD treat an unpinned or empty-pin record as a failure by default, and deployments SHOULD commit to the record set out-of-band (the Python reference ships a signed per-collection manifest: record count plus a Merkle root over `record_id → vec_hash`, signed under the distinct domain tag `vectorpin/manifest/v1\x00`).
+- **Signing boundary**: The protected interval begins at signing. A writer with access to the component that invokes the signer — or upstream of it — obtains legitimately signed pins for whatever it writes. Signing SHOULD run in a separate service or KMS the ingestion pipeline cannot invoke arbitrarily.
 - **Key custody**: An attacker with the private signing key can produce arbitrary pins. Treat the signing key as a high-value secret. Reference implementations write private keys with mode `0600`; production deployments SHOULD use a KMS or hardware-backed signer rather than file-system keys.
 - **Source-time integrity**: VectorPin attests to the relationship between source and vector at pin time. It does not attest that the source itself was authentic at ingestion. Pair VectorPin with source-side controls (signed ingestion logs, document provenance) where this matters.
 - **DoS via malformed pins**: Without the §4.3 size limits, a single hostile pin can exhaust verifier resources. Implementations MUST enforce these limits before reaching the signature path.
@@ -240,7 +253,7 @@ The v1 → v2 wire-format break addresses these audit-identified issues:
 
 1. **`v` was not in the signed payload** — v1 verifiers could not detect a downgrade where an attacker flipped `v: 2` to `v: 1` on a v2 pin. v2 includes `v` in the canonical bytes (§4.2).
 2. **`kid` was not in the signed payload** — an attacker who could swap `(kid, sig)` pairs could re-attribute a pin to a different producer. v2 includes `kid` in the canonical bytes.
-3. **No domain separator** — a VectorPin signature was structurally identical to any other "signed canonical JSON" message, enabling cross-protocol signature reuse against sister Trust-Stack protocols. v2 prepends a 14-byte `vectorpin/v2\x00` tag.
+3. **No domain separator** — a VectorPin signature was structurally identical to any other "signed canonical JSON" message, enabling cross-protocol signature reuse against sister Trust-Stack protocols. v2 prepends a 13-byte `vectorpin/v2\x00` tag.
 4. **Float canonicalization underspecified** — v1 said "little-endian, contiguous" but didn't specify NaN/Inf handling. v2 requires rejection of NaN/Inf at sign time; `-0.0` and `+0.0` are distinct.
 5. **String canonicalization underspecified** — v1 required NFC for `source` only. v2 requires NFC for every string field, plus rejection of control characters and bidi overrides.
 6. **`extra` value types underspecified** — v1 said "object" with no constraint. v2 is strictly `map<string, string>`, with rejection at parse.

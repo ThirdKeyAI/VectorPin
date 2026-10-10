@@ -144,7 +144,21 @@ Common audit summary shape:
 }
 ```
 
-`unpinned` records are reported but do **not** by themselves fail the run — operators who want stricter behavior can `grep` `unpinned` from the JSON summary in CI.
+`unpinned` records **fail the run** unless `--allow-unpinned` is passed: an attacker who can rewrite a vector can delete its pin just as easily. Each one is named on stderr as `FAIL <id> [unpinned]`. An empty or whitespace-only pin field is always a `parse_error`, never "unpinned". A malformed pin does not stop the walk — every later record is still examined.
+
+Flags shared by every `audit-*` command:
+
+| Flag | Effect |
+|---|---|
+| `--allow-unpinned` | Tolerate records without a pin (partial backfills). |
+| `--no-record-id-check` | Do not require a pin's `vectorpin.record_id` to equal the id of the record it is stored on (enforced by default — this is what defeats pin-shuffle replay). |
+| `--collection-id ID` / `--tenant-id ID` | Require every pin to carry exactly this `vectorpin.collection_id` / `vectorpin.tenant_id`. |
+| `--expected-model NAME` / `--expected-model-hash sha256:...` | Require the model identifier / weights hash. |
+| `--manifest PATH` | Compare the walked record set against a signed collection manifest (count + Merkle root); `--manifest-public-key` / `--manifest-key-id` select a different key than the audit key. |
+| `--write-manifest PATH --manifest-key PRIV --manifest-key-id KID` | Write a signed manifest of the walked record set (run right after ingestion). |
+| `--sign-summary-key PRIV --sign-summary-key-id KID` | Sign the JSON summary; check it with `vectorpin verify-summary`. |
+
+The summary gains `"manifest": "ok"` (or the mismatch reason) when `--manifest` is used, `"manifest_written"` when a manifest is written, `"aborted"` if the store walk failed part-way, and `summary_kid` / `summary_ts` / `summary_sig` when signed.
 
 ### `vectorpin audit-lancedb`
 
@@ -267,15 +281,23 @@ Non-zero exit triggers your alerting; the JSON summary is the audit log.
       --source-column text
 ```
 
-### Treat unpinned records as failures
+### Tolerate unpinned records during a backfill
 
-The audit commands tolerate unpinned records by design (migrations, partial backfills). To fail closed:
+The audit commands fail closed on unpinned records. While a corpus is being pinned for the first time, opt in explicitly and drop the flag once the backfill is complete:
 
 ```bash
-summary=$(vectorpin audit-lancedb --uri ./db --table t --public-key ./k.pub --key-id k)
-echo "$summary"
-echo "$summary" | python -c "import json,sys; s=json.load(sys.stdin); sys.exit(1 if s['unpinned'] else 0)"
+vectorpin audit-lancedb --uri ./db --table t --public-key ./k.pub --key-id k --allow-unpinned
 ```
+
+### `vectorpin verify-summary`
+
+Verify a summary produced with `--sign-summary-key`:
+
+```bash
+vectorpin verify-summary --public-key ./keys/audit.pub --key-id audit --summary report.json
+```
+
+Exit code `0` on `OK`, `2` with `FAIL [<error>] <detail>` on stderr otherwise.
 
 ---
 

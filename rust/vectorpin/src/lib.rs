@@ -88,6 +88,7 @@
 //! | [`VerifyError::UnknownKey`] | Pin signed by a key not in the verifier's registry |
 //! | [`VerifyError::UnsupportedVersion`] | Protocol version mismatch |
 //! | [`VerifyError::ShapeMismatch`] | Supplied vector's dim disagrees with the pin header |
+//! | [`VerifyError::PrecisionWidening`] | Supplied vector is wider than the pinned `vec_dtype` (never narrowed before hashing) |
 //!
 //! # Architecture
 //!
@@ -106,21 +107,31 @@
 //!
 //! # Threat model
 //!
-//! VectorPin is designed against an attacker who can:
+//! The protected interval begins at signing. VectorPin is designed
+//! against an attacker who, *after* a pin is signed, can:
 //!
-//! * Modify vectors after they are produced — via a poisoned ingestion
-//!   pipeline, a compromised vector DB, or backup-level access.
+//! * Modify vectors in the vector DB, in backups, or anywhere downstream
+//!   of the signer — in the dtype the store persists (any magnitude,
+//!   down to a single bit), or in a wider representation (refused
+//!   outright).
 //! * See the public verification key but not the private signing key.
-//! * Replay or selectively delete pins.
+//! * Replay pins across records, collections, or tenants (caught when the
+//!   `vectorpin.*` bindings are enforced) or strip pins (caught by a
+//!   fail-closed audit and by a signed collection manifest).
 //!
 //! VectorPin does **not** defend against:
 //!
-//! * An attacker with the private signing key (out of scope; key custody
-//!   is the user's responsibility).
+//! * An attacker with the private signing key, or with write access to
+//!   the component that invokes it before signing happens — a poisoned
+//!   ingestion pipeline that sits upstream of the signer produces
+//!   legitimately signed pins. Move signing to the earliest trustworthy
+//!   point (a separate signing service or KMS the pipeline cannot invoke
+//!   arbitrarily).
 //! * An attacker who modifies the source documents *before* embedding
 //!   (use upstream content integrity controls).
-//! * An attacker who uses a legitimate signing key to attest a malicious
-//!   vector at ingestion time (use upstream input validation).
+//! * Model substitution by label: `model` is a self-declared string and
+//!   `model_hash` is only as trustworthy as the signer that wrote it;
+//!   require it with [`VerifyOptions::expected_model_hash`].
 //!
 //! For the empirical evaluation of the attack class VectorPin is built to
 //! defeat, see the companion preprint at
@@ -140,4 +151,6 @@ pub mod verifier;
 pub use attestation::{AttestationError, Pin, PinHeader, DOMAIN_TAG, PROTOCOL_VERSION};
 pub use hash::{canonical_vector_bytes, hash_text, hash_vector, VecDtype};
 pub use signer::{Signer, SignerError};
-pub use verifier::{KeyEntry, LegacyV1Verifier, Verifier, VerifyError, VerifyOptions};
+pub use verifier::{
+    parse_ts_unix, KeyEntry, LegacyV1Verifier, Verifier, VerifyError, VerifyOptions,
+};

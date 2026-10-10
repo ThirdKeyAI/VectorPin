@@ -5,6 +5,124 @@ All notable changes to VectorPin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Security fixes from the 2026-10 review of the v0.2.0 release. IDs refer
+to that review's findings. The wire format is unchanged (still `v: 2`);
+the verifier contract is stricter, so pins over wider-than-persisted
+input and audits of partially pinned stores now fail where they used
+to pass — see "Behavior changes" below.
+
+### Security
+
+- **VP-1 (High)** — Verifiers cast a supplied vector to the pinned dtype
+  before hashing, so an f64 store checked against an f32 pin left
+  ~28 bits per element unverified, and every adapter coerced to f32
+  before the verifier saw the data. All three verifiers now refuse a
+  vector wider than `vec_dtype` (`SHAPE_MISMATCH`; Rust
+  `VerifyError::PrecisionWidening`), adapters return the store's native
+  dtype, and the Python/TypeScript signers default `vec_dtype` to the
+  input's native dtype (Rust already did). Spec §3.2 gains the precision
+  rule.
+- **VP-2 (High)** — The audit CLI treated missing or empty pins as
+  harmless `unpinned` and exited 0. Unpinned records now fail unless
+  `--allow-unpinned`; empty pin fields are `parse_error`; every failing
+  record is named. A signed collection manifest (count + Merkle root
+  over `record_id → vec_hash`, `vectorpin.manifest`, `--write-manifest`
+  / `--manifest`) catches deleted and inserted records.
+- **VP-3 (High)** — The audit never enforced record / collection /
+  tenant / model bindings. `vectorpin.record_id` is now checked against
+  the record it sits on by default (`--no-record-id-check` to disable);
+  `--collection-id`, `--tenant-id`, `--expected-model`,
+  `--expected-model-hash` added to every `audit-*` command and to
+  `verify-pin`.
+- **VP-4 (High, design)** — README, `docs/security.md`,
+  `docs/deployment.md`, and the Rust crate docs now state that the
+  protected interval begins at signing, that a writer upstream of the
+  signer is out of scope, and that the signer should run as a separate
+  service / KMS; the previously contradictory threat-model bullets are
+  reconciled.
+- **VP-5 (Medium)** — `valid_until` was keyed on the signer-chosen `ts`,
+  so a compromised key could backdate forgeries into the window. The
+  limitation is documented (spec §7, §9) and every verifier takes a
+  `trusted_time` / `trustedTime` / `VerifyOptions::trusted_time`
+  (verifier-trusted ingestion instant) against which the window is
+  evaluated; a `ts` after the trusted time is rejected.
+- **VP-6 (Medium)** — Lone surrogates crashed the Python verifier and
+  were emitted by the TypeScript signer. Rejected at parse and sign time
+  in Python and TypeScript (Rust already refused them); `hash_text`
+  refuses unencodable text; `verify()` never raises in any port.
+- **VP-7 (Medium)** — The audit stopped at the first malformed pin
+  because the adapter generator was finalized by the exception.
+  Adapters yield error-carrying records (`PinnedRecord.parse_error`),
+  the loop catches any adapter failure, and a mid-corpus malformed pin
+  is covered by tests.
+- **VP-8 (Medium)** — CI never ran the TypeScript suite. Added a
+  `typescript` job; the fixtures job now runs every port's
+  cross-language tests after regenerating `testvectors/`.
+- **VP-9 (Medium)** — The Rust `ts` parser accepted impossible calendar
+  dates and could underflow `u32` before the signature check. All three
+  parsers now require a valid proleptic-Gregorian instant; Rust uses
+  checked `i64` arithmetic and exports `parse_ts_unix`.
+- **VP-10 (Medium)** — `model_hash` could not be checked.
+  `expected_model_hash` added to all three verifiers and the CLI;
+  `vectorpin.hash_files` implements the spec §4.1 convention, which is
+  now spelled out.
+- **VP-11 (Low)** — A naive `datetime` in `KeyEntry` raised `TypeError`
+  from `verify()`; rejected at construction instead.
+- **VP-12 (Low)** — `sig` decoding diverged (Python lenient, TypeScript
+  padding-tolerant, Rust strict). Python and TypeScript now accept only
+  the canonical URL-safe, unpadded, zero-trailing-bits encoding.
+- **VP-13 (Low)** — `v: 2.0` parsed in Python/TypeScript, Rust truncated
+  `v` with `as u32`, and `extra: null` was accepted by Rust/TypeScript.
+  All ports require a minimal integer literal and reject `extra: null`.
+- **VP-14 (Low)** — Dict-path pins bypassed the size cap and `kid` /
+  `model` were unbounded. Per-field caps (`kid` 256 B, `model` 1 KiB)
+  apply on every parse path before normalization; spec §4.3 updated.
+- **VP-15 (Low)** — Chroma HTTP adapter sent auth headers over plaintext
+  without the TLS guard the other adapters have. Guard added;
+  `audit-chroma --header NAME=VALUE` wired through it.
+- **VP-16 (Low)** — ed25519-dalek `zeroize` feature enabled so the Rust
+  `SigningKey` is wiped on drop; the Python signer rejects empty
+  vectors instead of emitting an unparseable `vec_dim=0` pin.
+- **VP-17 (Info)** — Spec corrected: 13-byte domain tag, `\uXXXX` escapes
+  for U+0000–U+001F only (U+007F emitted raw), and the three verifiers
+  reordered to check source (step 5) before vector (step 6) as §5 says.
+- **VP-18 (Info)** — TypeScript port no longer uses Node `Buffer`
+  (pure-JS base64url codec, `utf8ByteLength`); README claims about
+  Deno/Bun and the Symbiont integration qualified.
+
+### Added
+
+- `BaseAdapter.get_verified` / `iter_verified` read wrappers.
+- Signed audit summaries (`--sign-summary-key`, `vectorpin
+  verify-summary`, `vectorpin.sign_audit_summary` /
+  `verify_audit_summary`).
+- Warning when a group/world-readable `.priv` file is loaded
+  (`VECTORPIN_QUIET_KEY_PERMS=1` silences it).
+- Cross-language fixtures for float edge cases (signed zeros,
+  subnormals, f32/f64 max, f64→f32 round-to-nearest-even ties), the
+  widening channel, calendar-invalid timestamps, lone surrogates,
+  padded / non-canonical `sig`, `v: 2.0`, `extra: null`, field caps,
+  model-hash, collection / tenant, and KEY_EXPIRED cases.
+- Property tests over canonical bytes in all three ports (hypothesis,
+  proptest, fast-check) and VectorSmuggle-style perturbation tests.
+- Supply-chain CI job (`cargo audit`, `npm audit --omit=dev`,
+  `pip-audit`); `cryptography` upper bound removed.
+
+### Behavior changes
+
+- `Signer.pin` (Python) and `Signer.pin` (TypeScript) default
+  `vec_dtype` to the input's native dtype instead of `f32`. Pin under
+  the dtype your store persists; pass `vec_dtype="f32"` explicitly to
+  keep the old behavior for 64-bit input.
+- `Verifier.verify` rejects a vector wider than the pinned dtype as
+  `SHAPE_MISMATCH` instead of casting it.
+- `audit-*` commands fail on unpinned records unless `--allow-unpinned`
+  and enforce `vectorpin.record_id` when a pin carries it.
+- The Rust `VerifyError` enum gains `PrecisionWidening`; `VerifyOptions`
+  gains `expected_model_hash` and `trusted_time`.
+
 ## [0.2.0] — 2026-05-15
 
 Promotes 0.2.0-rc.1 to a stable release with one additive change since
@@ -158,8 +276,11 @@ implementation-level findings:
   an `api_key` over `http://` for non-loopback hosts unless
   `VECTORPIN_ALLOW_INSECURE_HTTP=1` is set.
 - **Python audit loop**: a single malformed pin in
-  `audit-{lancedb,chroma,qdrant}` no longer aborts the run; bad rows
-  are surfaced as `parse_error` and the audit continues.
+  `audit-{lancedb,chroma,qdrant}` no longer aborts the run with a
+  traceback; the bad row is surfaced as `parse_error`. (Correction: in
+  0.2.0 the walk still *ended* at that row because the adapter
+  generator was finalized by the exception, so later records went
+  unaudited; see VP-7 under Unreleased for the fix.)
 - **Python `Signer.from_pem`**: requires explicit `password=...` or
   `allow_unencrypted=True` to load an unencrypted PEM. Default
   behavior refuses.

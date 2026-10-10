@@ -20,7 +20,12 @@ The adapter protocol lives at [`src/vectorpin/adapters/base.py`](https://github.
 | pgvector | Planned | — | |
 | FAISS | Planned | Use `LanceDBAdapter` (embedded, has metadata column natively). | |
 
-All adapters present the same `iter_records()` / `attach_pin()` interface. The backend differences are limited to where the pin physically lives in the underlying record.
+All adapters present the same `iter_records()` / `get()` / `attach_pin()` interface, plus two verifying read wrappers inherited from `BaseAdapter`: `get_verified(record_id, verifier, ...)` and `iter_verified(verifier, ...)` return each record together with a structured `VerificationResult` (unpinned and unparseable records fail closed, `vectorpin.record_id` is enforced, nothing raises on record content). The backend differences are limited to where the pin physically lives in the underlying record.
+
+Two contracts every adapter honors:
+
+- **Native precision.** The `vector` on a `PinnedRecord` carries the dtype the store persists — read from the schema for LanceDB and pgvector, single precision for Chroma, Qdrant and Pinecone (their storage is float32; the JSON transport width is not evidence of the storage width, and the narrowing is checked to be exact). Adapters never coerce, because the verifier refuses a vector wider than the pinned dtype and a coerced one would hide exactly the bits an attacker could use. `QdrantAdapter(..., vector_dtype=...)` declares a non-default collection datatype.
+- **Never raise per row.** A malformed, empty, or whitespace-only pin field yields a record with `pin=None` and `parse_error` set instead of raising from inside the generator (which would end the walk at the first bad row). `pin is None and parse_error is None` means genuinely unpinned.
 
 ---
 

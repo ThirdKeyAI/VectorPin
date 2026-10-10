@@ -25,7 +25,13 @@ from urllib.parse import urlparse
 
 import numpy as np
 
-from vectorpin.adapters.base import PIN_METADATA_KEY, BaseAdapter, PinnedRecord
+from vectorpin.adapters.base import (
+    PIN_METADATA_KEY,
+    BaseAdapter,
+    PinnedRecord,
+    parse_pin_field,
+    vector_from_store,
+)
 from vectorpin.attestation import Pin
 
 if TYPE_CHECKING:
@@ -168,10 +174,11 @@ class PineconeAdapter(BaseAdapter):
             metadata = getattr(payload, "metadata", None)
         if values is None:
             raise ValueError(f"record {rid!r} returned no values; was the index queried correctly?")
-        vector = np.asarray(values, dtype=np.float32)
-        if vector.ndim != 1:
-            raise ValueError(f"record {rid!r} returned non-1D values shape {vector.shape}")
+        # Pinecone persists single-precision dense vectors; the REST
+        # transport delivers them as Python floats.
+        vector = vector_from_store(values, native_dtype=np.float32)
         meta = dict(metadata or {})
-        pin_payload = meta.pop(PIN_METADATA_KEY, None)
-        pin = Pin.from_json(pin_payload) if pin_payload else None
-        return PinnedRecord(id=str(rid), vector=vector, pin=pin, metadata=meta)
+        pin, parse_error = parse_pin_field(meta.pop(PIN_METADATA_KEY, None))
+        return PinnedRecord(
+            id=str(rid), vector=vector, pin=pin, metadata=meta, parse_error=parse_error
+        )

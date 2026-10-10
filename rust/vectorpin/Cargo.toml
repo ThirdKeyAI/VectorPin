@@ -27,6 +27,7 @@ rand = "0.8"
 [dev-dependencies]
 # Tests reuse the same rand version as the crate.
 criterion = { workspace = true }
+proptest = { workspace = true }
 
 [features]
 default = []

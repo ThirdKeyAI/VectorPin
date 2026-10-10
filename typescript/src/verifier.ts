@@ -17,13 +17,20 @@ import * as ed25519 from '@noble/ed25519';
 import {
   canonicalizeHeader,
   canonicalizeHeaderV1,
+  isValidCalendarTs,
   pinFromDict,
   pinFromJSON,
   PROTOCOL_VERSION,
   SIG_LEN,
   type Pin,
 } from './attestation.js';
-import { hashText, hashVector, type VectorInput } from './hash.js';
+import {
+  hashText,
+  hashVector,
+  nativeDtype,
+  vectorElementWidth,
+  type VectorInput,
+} from './hash.js';
 
 /**
  * Distinct verification failure modes. Callers route on this so a
@@ -62,6 +69,11 @@ export interface VerificationResult {
 /**
  * A registered public key, with an optional validity window per
  * spec §7. `validFrom` is inclusive; `validUntil` is exclusive.
+ *
+ * The window is evaluated against the pin's signer-chosen `ts` unless
+ * the caller supplies `VerifyOptions.trustedTime`; on its own it
+ * therefore only bounds honest signers — a holder of a compromised
+ * key can backdate `ts` into the window.
  */
 export interface KeyEntry {
   readonly publicKey: Uint8Array;
@@ -74,10 +86,28 @@ export type KeyRegistration = Uint8Array | KeyEntry;
 export interface VerifyOptions {
   /** If provided, the source text is rehashed and compared to `source_hash`. */
   source?: string;
-  /** If provided, the vector is rehashed under `vec_dtype` and compared to `vec_hash`. */
+  /**
+   * If provided, the vector is rehashed under `vec_dtype` and compared
+   * to `vec_hash`. A `Float64Array` or plain `number[]` (both 64-bit
+   * representations) is refused against an `f32` pin as
+   * `SHAPE_MISMATCH` rather than narrowed: the bits a cast discards
+   * would otherwise go unverified (spec §3.2).
+   */
   vector?: VectorInput;
   /** If provided, the pin's `model` field must equal this string. */
   expectedModel?: string;
+  /**
+   * If provided, the pin's `model_hash` must equal this `sha256:<hex>`
+   * value; a pin without one fails `MODEL_MISMATCH`.
+   */
+  expectedModelHash?: string;
+  /**
+   * An instant from a clock the signing-key holder cannot write (for
+   * example the store's own ingestion timestamp). When supplied, the key
+   * validity window is evaluated against it instead of the pin's `ts`,
+   * and a pin whose `ts` postdates it is rejected as `KEY_EXPIRED`.
+   */
+  trustedTime?: Date;
   /**
    * Replay-protection identifiers (spec §5 step 8). If supplied, the
    * verifier checks the corresponding `vectorpin.*` value in the
@@ -105,13 +135,20 @@ function sanitizeDetail(s: string): string {
 }
 
 /**
- * Parse a v2-style `ts` string into a UTC `Date`. Returns null if
- * the string is unparseable so the caller can fail safely.
+ * Parse a pin `ts` into a UTC `Date`. Returns null if the string is
+ * unparseable so the caller can fail safely.
+ *
+ * v2 pins must satisfy the strict shape AND calendar validity (V8's
+ * `Date.parse` would roll `2026-02-30` forward to March 2, which no
+ * other port does). v1 pins keep the lenient RFC 3339 parse because
+ * the legacy verifier has to accept historical artifacts.
  */
-function parseTs(ts: string): Date | null {
-  // Strict v2 form is "YYYY-MM-DDTHH:MM:SSZ"; we also accept the
-  // less-strict RFC 3339 form because this helper is shared with the
-  // legacy v1 verifier.
+function parseTs(ts: string, version: number): Date | null {
+  if (version === PROTOCOL_VERSION) {
+    if (!isValidCalendarTs(ts)) return null;
+    const t = Date.parse(ts);
+    return Number.isNaN(t) ? null : new Date(t);
+  }
   const t = Date.parse(ts);
   if (Number.isNaN(t)) return null;
   return new Date(t);
@@ -161,8 +198,25 @@ export class Verifier {
   /**
    * Verify a Pin. The signature check always runs; the others are
    * gated on which ground-truth values you supply.
+   *
+   * Never rejects (throws) on account of pin content or ground truth:
+   * anything unexpected is reported as a `PARSE_ERROR` result so a
+   * hostile record cannot turn a read path into an exception path.
    */
   async verify(pin: Pin, opts: VerifyOptions = {}): Promise<VerificationResult> {
+    try {
+      return await this.#verifyInner(pin, opts);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return result(
+        false,
+        VerifyErrorCode.PARSE_ERROR,
+        `verification aborted on malformed input: ${sanitizeDetail(msg)}`,
+      );
+    }
+  }
+
+  async #verifyInner(pin: Pin, opts: VerifyOptions): Promise<VerificationResult> {
     // Step 1: version dispatch.
     const accepted = this.#acceptV1Legacy
       ? [PROTOCOL_VERSION, 1]
@@ -194,8 +248,12 @@ export class Verifier {
         `no registered public key for kid=${sanitizeDetail(pin.header.kid)}`,
       );
     }
-    if (entry.validFrom !== undefined || entry.validUntil !== undefined) {
-      const pinTs = parseTs(pin.header.ts);
+    if (
+      entry.validFrom !== undefined ||
+      entry.validUntil !== undefined ||
+      opts.trustedTime !== undefined
+    ) {
+      const pinTs = parseTs(pin.header.ts, pin.header.v);
       if (pinTs === null) {
         return result(
           false,
@@ -203,14 +261,31 @@ export class Verifier {
           'pin ts unparseable; cannot evaluate key validity window',
         );
       }
-      if (entry.validFrom !== undefined && pinTs < entry.validFrom) {
+      // `ts` is chosen by whoever holds the signing key; a trusted time
+      // from the store binds the window to a clock the key holder
+      // cannot write.
+      let windowTs = pinTs;
+      if (opts.trustedTime !== undefined) {
+        if (!(opts.trustedTime instanceof Date) || Number.isNaN(opts.trustedTime.getTime())) {
+          return result(false, VerifyErrorCode.PARSE_ERROR, 'trustedTime must be a valid Date');
+        }
+        if (pinTs > opts.trustedTime) {
+          return result(
+            false,
+            VerifyErrorCode.KEY_EXPIRED,
+            `pin ts ${sanitizeDetail(pin.header.ts)} postdates the trusted time`,
+          );
+        }
+        windowTs = opts.trustedTime;
+      }
+      if (entry.validFrom !== undefined && windowTs < entry.validFrom) {
         return result(
           false,
           VerifyErrorCode.KEY_EXPIRED,
           `pin ts ${sanitizeDetail(pin.header.ts)} predates key validFrom`,
         );
       }
-      if (entry.validUntil !== undefined && pinTs >= entry.validUntil) {
+      if (entry.validUntil !== undefined && windowTs >= entry.validUntil) {
         return result(
           false,
           VerifyErrorCode.KEY_EXPIRED,
@@ -235,42 +310,83 @@ export class Verifier {
       );
     }
 
-    // Step 6: vector check. Vector NaN/Inf at verify time is a parse
-    // error per spec §5 step 6 — reject before hashing.
-    if (opts.vector !== undefined) {
-      if (opts.vector.length !== pin.header.vec_dim) {
+    // Step 5: source check.
+    if (opts.source !== undefined) {
+      let sourceHash: string;
+      try {
+        sourceHash = hashText(opts.source);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
         return result(
           false,
-          VerifyErrorCode.SHAPE_MISMATCH,
-          `vector length ${opts.vector.length} != pin dim ${pin.header.vec_dim}`,
+          VerifyErrorCode.PARSE_ERROR,
+          `supplied source cannot be hashed: ${sanitizeDetail(msg)}`,
         );
       }
-      for (let i = 0; i < opts.vector.length; i++) {
-        const x = opts.vector[i] as number;
-        if (!Number.isFinite(x)) {
-          return result(
-            false,
-            VerifyErrorCode.PARSE_ERROR,
-            'supplied vector contains NaN or infinity',
-          );
-        }
-      }
-      if (hashVector(opts.vector, pin.header.vec_dtype) !== pin.header.vec_hash) {
+      if (sourceHash !== pin.header.source_hash) {
         return result(
           false,
-          VerifyErrorCode.VECTOR_TAMPERED,
-          'vector hash mismatch — embedding has been modified after pinning',
+          VerifyErrorCode.SOURCE_MISMATCH,
+          'source hash mismatch — pinned source differs from supplied source',
         );
       }
     }
 
-    // Step 5: source check.
-    if (opts.source !== undefined && hashText(opts.source) !== pin.header.source_hash) {
-      return result(
-        false,
-        VerifyErrorCode.SOURCE_MISMATCH,
-        'source hash mismatch — pinned source differs from supplied source',
-      );
+    // Step 6: vector check. Vector NaN/Inf at verify time is a parse
+    // error per spec §5 step 6 — reject before hashing.
+    if (opts.vector !== undefined) {
+      const vec = opts.vector;
+      if (
+        !(vec instanceof Float32Array) &&
+        !(vec instanceof Float64Array) &&
+        !Array.isArray(vec)
+      ) {
+        return result(
+          false,
+          VerifyErrorCode.SHAPE_MISMATCH,
+          'vector must be a Float32Array, Float64Array, or number[]',
+        );
+      }
+      if (vec.length !== pin.header.vec_dim) {
+        return result(
+          false,
+          VerifyErrorCode.SHAPE_MISMATCH,
+          `vector length ${vec.length} != pin dim ${pin.header.vec_dim}`,
+        );
+      }
+      // Precision check (§3.2): never narrow a wider vector before
+      // hashing — the discarded bits would be a covert channel.
+      const pinnedWidth = pin.header.vec_dtype === 'f32' ? 4 : 8;
+      if (vectorElementWidth(vec) > pinnedWidth) {
+        return result(
+          false,
+          VerifyErrorCode.SHAPE_MISMATCH,
+          `supplied vector is a 64-bit representation (${
+            vec instanceof Float64Array ? 'Float64Array' : 'number[]'
+          }) but the pin's vec_dtype is f32; low-order bits would be unverified. ` +
+            'Pass a Float32Array holding what the store persists.',
+        );
+      }
+      for (let i = 0; i < vec.length; i++) {
+        const x = vec[i] as number;
+        if (typeof x !== 'number' || !Number.isFinite(x)) {
+          return result(
+            false,
+            VerifyErrorCode.PARSE_ERROR,
+            'supplied vector contains NaN, infinity, or a non-number',
+          );
+        }
+      }
+      if (hashVector(vec, pin.header.vec_dtype) !== pin.header.vec_hash) {
+        let detail = 'vector hash mismatch — embedding has been modified after pinning';
+        const supplied = nativeDtype(vec);
+        if (supplied !== pin.header.vec_dtype) {
+          detail += ` (supplied vector is ${supplied} but the pin was signed as ${
+            pin.header.vec_dtype
+          }; if your store persists ${supplied}, pin with vecDtype: '${supplied}')`;
+        }
+        return result(false, VerifyErrorCode.VECTOR_TAMPERED, detail);
+      }
     }
 
     // Step 7: model check.
@@ -280,6 +396,18 @@ export class Verifier {
         VerifyErrorCode.MODEL_MISMATCH,
         `pin model ${sanitizeDetail(pin.header.model)} != expected ${sanitizeDetail(
           opts.expectedModel,
+        )}`,
+      );
+    }
+    if (
+      opts.expectedModelHash !== undefined &&
+      pin.header.model_hash !== opts.expectedModelHash
+    ) {
+      return result(
+        false,
+        VerifyErrorCode.MODEL_MISMATCH,
+        `pin model_hash ${sanitizeDetail(String(pin.header.model_hash))} != expected ${sanitizeDetail(
+          opts.expectedModelHash,
         )}`,
       );
     }

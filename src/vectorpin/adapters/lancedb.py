@@ -23,7 +23,13 @@ from typing import Any
 
 import numpy as np
 
-from vectorpin.adapters.base import PIN_METADATA_KEY, BaseAdapter, PinnedRecord
+from vectorpin.adapters.base import (
+    PIN_METADATA_KEY,
+    BaseAdapter,
+    PinnedRecord,
+    parse_pin_field,
+    vector_from_store,
+)
 from vectorpin.attestation import Pin
 
 # Default column names used by LanceDBAdapter. Override at construction
@@ -127,9 +133,11 @@ class LanceDBAdapter(BaseAdapter):
 
         We pull the table as an Arrow table and iterate batches so the
         entire dataset is not held twice in Python at once. Lance
-        scans return the original f32 vector regardless of any IVF/PQ
-        index built on top of the table — pinning is meaningful
-        against the input vector, which is what verification needs.
+        scans return the original stored vector, in the vector column's
+        own element type, regardless of any IVF/PQ index built on top
+        of the table — pinning is meaningful against the stored vector,
+        which is what verification needs. Quantized index copies are
+        never read here and are outside the integrity boundary.
         """
         arrow_table = self._table.to_arrow()
         for batch in arrow_table.to_batches(max_chunksize=batch_size):
@@ -171,6 +179,10 @@ class LanceDBAdapter(BaseAdapter):
             )
         ids = batch.column(self._id).to_pylist()
         vectors = batch.column(self._vec).to_pylist()
+        # `to_pylist()` yields Python floats (64-bit) whatever the
+        # column holds, so recover the persisted element type from the
+        # Arrow schema: that is the precision the verifier must see.
+        native_dtype = _arrow_element_dtype(batch.schema.field(self._vec).type)
         pin_strs = (
             batch.column(self._pin).to_pylist() if self._pin in names else [None] * batch.num_rows
         )
@@ -180,20 +192,27 @@ class LanceDBAdapter(BaseAdapter):
         passthrough = {c: batch.column(c).to_pylist() for c in passthrough_cols}
 
         for i, rid in enumerate(ids):
-            vector = np.asarray(vectors[i], dtype=np.float32)
-            if vector.ndim != 1:
-                raise ValueError(
-                    f"vector column {self._vec!r} returned non-1D shape {vector.shape}"
-                )
-            pin_str = pin_strs[i]
-            pin = Pin.from_json(pin_str) if pin_str else None
+            vector = vector_from_store(vectors[i], native_dtype=native_dtype)
+            pin, parse_error = parse_pin_field(pin_strs[i])
             metadata = {c: passthrough[c][i] for c in passthrough_cols}
             yield PinnedRecord(
                 id=str(rid),
                 vector=vector,
                 pin=pin,
                 metadata=metadata,
+                parse_error=parse_error,
             )
+
+
+def _arrow_element_dtype(arrow_type: Any) -> np.dtype | None:
+    """numpy dtype of a (fixed-size) list column's elements, or None."""
+    value_type = getattr(arrow_type, "value_type", None)
+    if value_type is None:
+        return None
+    try:
+        return np.dtype(value_type.to_pandas_dtype())
+    except (TypeError, ValueError, AttributeError, NotImplementedError):
+        return None
 
 
 def _id_predicate(column: str, record_id: str) -> str:

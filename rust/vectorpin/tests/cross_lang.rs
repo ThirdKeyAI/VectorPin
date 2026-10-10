@@ -22,7 +22,7 @@ use serde_json::Value;
 
 use vectorpin::{
     hash::{hash_text, hash_vector, VecDtype, VectorRef},
-    KeyEntry, Pin, Signer, Verifier, VerifyError, VerifyOptions,
+    parse_ts_unix, KeyEntry, Pin, Signer, Verifier, VerifyError, VerifyOptions,
 };
 
 // ---- v2 positive fixtures ----------------------------------------------
@@ -51,12 +51,49 @@ struct V2Input {
     model: String,
     vec_b64: String,
     vec_dtype: String,
+    /// dtype of the bytes in `vec_b64` when it differs from the pinned
+    /// `vec_dtype` (the signer casts at sign time; the verifier is then
+    /// handed the cast vector, which is what the store persists).
+    #[serde(default)]
+    vec_native_dtype: Option<String>,
     vec_dim: usize,
     timestamp: String,
     #[serde(default)]
     model_hash: Option<String>,
     #[serde(default)]
     extra: std::collections::BTreeMap<String, String>,
+}
+
+/// Owned vector in either dtype.
+enum Vector {
+    F32(Vec<f32>),
+    F64(Vec<f64>),
+}
+
+impl Vector {
+    fn as_ref(&self) -> VectorRef<'_> {
+        match self {
+            Vector::F32(v) => VectorRef::F32(v),
+            Vector::F64(v) => VectorRef::F64(v),
+        }
+    }
+
+    fn parse(bytes: &[u8], dtype: VecDtype, dim: usize) -> Self {
+        match dtype {
+            VecDtype::F32 => Vector::F32(parse_vec_f32(bytes, dim)),
+            VecDtype::F64 => Vector::F64(parse_vec_f64(bytes, dim)),
+        }
+    }
+
+    /// Cast to `dtype` the way a store that persists `dtype` would.
+    fn cast(&self, dtype: VecDtype) -> Self {
+        match (self, dtype) {
+            (Vector::F32(v), VecDtype::F32) => Vector::F32(v.clone()),
+            (Vector::F64(v), VecDtype::F64) => Vector::F64(v.clone()),
+            (Vector::F64(v), VecDtype::F32) => Vector::F32(v.iter().map(|&x| x as f32).collect()),
+            (Vector::F32(v), VecDtype::F64) => Vector::F64(v.iter().map(|&x| x as f64).collect()),
+        }
+    }
 }
 
 fn b64(s: &str) -> Vec<u8> {
@@ -91,7 +128,17 @@ fn parse_vec_f64(bytes: &[u8], dim: usize) -> Vec<f64> {
 fn run_v2_fixture(bundle: &V2Bundle, fx: &V2Fixture) {
     eprintln!("running v2 fixture: {}", fx.name);
     let dtype = VecDtype::parse(&fx.input.vec_dtype).expect("known dtype");
+    let native_dtype = fx
+        .input
+        .vec_native_dtype
+        .as_deref()
+        .map(|d| VecDtype::parse(d).expect("known native dtype"))
+        .unwrap_or(dtype);
     let raw_bytes = b64(&fx.input.vec_b64);
+    // The signer is handed the native-dtype input (and casts if the pin
+    // dtype differs); the verifier is handed what the store persists.
+    let native = Vector::parse(&raw_bytes, native_dtype, fx.input.vec_dim);
+    let stored = native.cast(dtype);
 
     // 1. Hash equality on text and vector.
     assert_eq!(
@@ -100,19 +147,16 @@ fn run_v2_fixture(bundle: &V2Bundle, fx: &V2Fixture) {
         "source_hash mismatch for {}",
         fx.name
     );
-    let computed_vec_hash = match dtype {
-        VecDtype::F32 => {
-            let v = parse_vec_f32(&raw_bytes, fx.input.vec_dim);
-            hash_vector(VectorRef::F32(&v), dtype)
-        }
-        VecDtype::F64 => {
-            let v = parse_vec_f64(&raw_bytes, fx.input.vec_dim);
-            hash_vector(VectorRef::F64(&v), dtype)
-        }
-    };
     assert_eq!(
-        computed_vec_hash, fx.expected_vec_hash,
-        "vec_hash mismatch for {}",
+        hash_vector(native.as_ref(), dtype),
+        fx.expected_vec_hash,
+        "vec_hash mismatch (native input) for {}",
+        fx.name
+    );
+    assert_eq!(
+        hash_vector(stored.as_ref(), dtype),
+        fx.expected_vec_hash,
+        "vec_hash mismatch (stored dtype) for {}",
         fx.name
     );
 
@@ -131,20 +175,9 @@ fn run_v2_fixture(bundle: &V2Bundle, fx: &V2Fixture) {
         model_hash: fx.input.model_hash.clone(),
         extra: fx.input.extra.clone(),
     };
-    let pin = match dtype {
-        VecDtype::F32 => {
-            let v = parse_vec_f32(&raw_bytes, fx.input.vec_dim);
-            signer
-                .pin_with_options(&fx.input.source, &fx.input.model, v.as_slice(), opts)
-                .unwrap()
-        }
-        VecDtype::F64 => {
-            let v = parse_vec_f64(&raw_bytes, fx.input.vec_dim);
-            signer
-                .pin_with_options(&fx.input.source, &fx.input.model, v.as_slice(), opts)
-                .unwrap()
-        }
-    };
+    let pin = signer
+        .pin_with_options(&fx.input.source, &fx.input.model, native.as_ref(), opts)
+        .unwrap();
 
     // Canonical bytes must match Python output (domain tag + JSON body).
     let canonical = pin.header.canonicalize();
@@ -163,20 +196,27 @@ fn run_v2_fixture(bundle: &V2Bundle, fx: &V2Fixture) {
         fx.name
     );
 
-    // Round-trip and verify.
+    // Round-trip and verify, with the vector the store would persist.
     let parsed = Pin::from_json(&pin.to_json()).expect("rust parses its own JSON");
     let mut verifier = Verifier::new();
     verifier
         .add_key(&bundle.key_id, signer.public_key_bytes())
         .unwrap();
+    let full = VerifyOptions {
+        source: Some(&fx.input.source),
+        vector: Some(stored.as_ref()),
+        expected_model: Some(&fx.input.model),
+        expected_model_hash: fx.input.model_hash.as_deref(),
+        ..VerifyOptions::default()
+    };
     verifier
-        .verify_full::<&[f32]>(&parsed, Some(&fx.input.source), None, None)
+        .verify(&parsed, full.clone())
         .expect("rust verifies own pin");
 
     // Also verify the Python-produced JSON directly.
     let python_pin = Pin::from_json(&fx.pin_json).expect("rust parses python JSON");
     verifier
-        .verify_full::<&[f32]>(&python_pin, Some(&fx.input.source), None, None)
+        .verify(&python_pin, full)
         .expect("rust verifies python-produced pin");
 }
 
@@ -209,8 +249,8 @@ struct V2NegativeFixture {
     tampered_vec_b64: Option<String>,
     #[serde(default)]
     nan_vec_b64: Option<String>,
+    /// dtype of the supplied vector bytes (may differ from the pin's).
     #[serde(default)]
-    #[allow(dead_code)]
     vec_dtype: Option<String>,
     #[serde(default)]
     vec_dim: Option<usize>,
@@ -219,7 +259,19 @@ struct V2NegativeFixture {
     #[serde(default)]
     expected_model: Option<String>,
     #[serde(default)]
+    expected_model_hash: Option<String>,
+    #[serde(default)]
     expected_record_id: Option<String>,
+    #[serde(default)]
+    expected_collection_id: Option<String>,
+    #[serde(default)]
+    expected_tenant_id: Option<String>,
+    #[serde(default)]
+    key_valid_from: Option<String>,
+    #[serde(default)]
+    key_valid_until: Option<String>,
+    #[serde(default)]
+    trusted_time: Option<String>,
 }
 
 fn classify(err: &VerifyError) -> &'static str {
@@ -233,6 +285,8 @@ fn classify(err: &VerifyError) -> &'static str {
         VerifyError::SourceMismatch => "SOURCE_MISMATCH",
         VerifyError::ModelMismatch { .. } => "MODEL_MISMATCH",
         VerifyError::ShapeMismatch { .. } => "SHAPE_MISMATCH",
+        // Python and TypeScript report widening under SHAPE_MISMATCH.
+        VerifyError::PrecisionWidening { .. } => "SHAPE_MISMATCH",
         VerifyError::RecordMismatch => "RECORD_MISMATCH",
         VerifyError::CollectionMismatch => "COLLECTION_MISMATCH",
         VerifyError::TenantMismatch => "TENANT_MISMATCH",
@@ -250,7 +304,18 @@ fn run_negative(bundle: &V2NegativeBundle, fx: &V2NegativeFixture) {
     let pk: [u8; 32] = b64(&bundle.public_key_b64)
         .try_into()
         .expect("public key 32 bytes");
-    verifier.add_key(&bundle.key_id, pk).unwrap();
+    if fx.key_valid_from.is_some() || fx.key_valid_until.is_some() {
+        let mut entry = KeyEntry::from_public_bytes(pk).expect("valid key");
+        if let Some(vf) = &fx.key_valid_from {
+            entry = entry.with_valid_from(parse_ts_unix(vf).expect("fixture ts"));
+        }
+        if let Some(vu) = &fx.key_valid_until {
+            entry = entry.with_valid_until(parse_ts_unix(vu).expect("fixture ts"));
+        }
+        verifier.add_key_entry(&bundle.key_id, entry);
+    } else {
+        verifier.add_key(&bundle.key_id, pk).unwrap();
+    }
 
     // The pin may fail to parse — that itself is a PARSE_ERROR outcome.
     let parsed = match Pin::from_json(&fx.pin_json) {
@@ -267,44 +332,32 @@ fn run_negative(bundle: &V2NegativeBundle, fx: &V2NegativeFixture) {
         }
     };
 
-    let dtype = parsed.header.vec_dtype.clone();
-    let vec_holder_f32: Vec<f32>;
-    let vec_holder_f64: Vec<f64>;
-    let vec_ref: Option<VectorRef<'_>> = if let Some(b) = &fx.tampered_vec_b64 {
-        match dtype.as_str() {
-            "f32" => {
-                vec_holder_f32 = parse_vec_f32(&b64(b), fx.vec_dim.unwrap());
-                Some(VectorRef::F32(&vec_holder_f32))
-            }
-            "f64" => {
-                vec_holder_f64 = parse_vec_f64(&b64(b), fx.vec_dim.unwrap());
-                Some(VectorRef::F64(&vec_holder_f64))
-            }
-            _ => panic!("unknown dtype {dtype}"),
-        }
-    } else if let Some(b) = &fx.nan_vec_b64 {
-        // NaN-bearing vector — used for the nan_in_vector_at_verify case.
-        match dtype.as_str() {
-            "f32" => {
-                vec_holder_f32 = parse_vec_f32(&b64(b), fx.vec_dim.unwrap());
-                Some(VectorRef::F32(&vec_holder_f32))
-            }
-            "f64" => {
-                vec_holder_f64 = parse_vec_f64(&b64(b), fx.vec_dim.unwrap());
-                Some(VectorRef::F64(&vec_holder_f64))
-            }
-            _ => panic!("unknown dtype {dtype}"),
-        }
-    } else {
-        None
-    };
+    // The supplied bytes are in the fixture's `vec_dtype`, which may be
+    // wider than the pin's (the widening fixtures).
+    let supplied_dtype = fx
+        .vec_dtype
+        .as_deref()
+        .map(|d| VecDtype::parse(d).expect("known dtype"))
+        .unwrap_or_else(|| VecDtype::parse(&parsed.header.vec_dtype).unwrap());
+    let holder: Option<Vector> = fx
+        .tampered_vec_b64
+        .as_ref()
+        .or(fx.nan_vec_b64.as_ref())
+        .map(|b| Vector::parse(&b64(b), supplied_dtype, fx.vec_dim.unwrap()));
+    let vec_ref: Option<VectorRef<'_>> = holder.as_ref().map(Vector::as_ref);
 
     let opts = VerifyOptions {
         source: fx.tampered_source.as_deref(),
         vector: vec_ref,
         expected_model: fx.expected_model.as_deref(),
+        expected_model_hash: fx.expected_model_hash.as_deref(),
         expected_record_id: fx.expected_record_id.as_deref(),
-        ..VerifyOptions::default()
+        expected_collection_id: fx.expected_collection_id.as_deref(),
+        expected_tenant_id: fx.expected_tenant_id.as_deref(),
+        trusted_time: fx
+            .trusted_time
+            .as_deref()
+            .map(|t| parse_ts_unix(t).expect("fixture trusted_time")),
     };
     let err = verifier
         .verify(&parsed, opts)

@@ -3,9 +3,10 @@
 """VectorPin — verifiable integrity for AI embedding stores.
 
 VectorPin pins each embedding to its source content and the model that
-produced it, then continuously verifies the store has not been tampered
-with — including covert steganographic modifications invisible to
-traditional DLP.
+produced it, then lets you verify — on every read through the adapter
+read wrappers, and on a schedule through the audit CLI — that the store
+has not been tampered with since signing, including covert
+steganographic modifications invisible to traditional DLP.
 
 Part of the ThirdKey Trust Stack.
 
@@ -31,7 +32,23 @@ from vectorpin.attestation import (
     Pin,
     PinHeader,
 )
-from vectorpin.hash import canonical_vector_bytes, hash_text, hash_vector
+from vectorpin.hash import (
+    canonical_vector_bytes,
+    hash_files,
+    hash_text,
+    hash_vector,
+    native_dtype,
+)
+from vectorpin.manifest import (
+    CollectionManifest,
+    ManifestError,
+    ManifestResult,
+    build_manifest,
+    merkle_root,
+    sign_audit_summary,
+    verify_audit_summary,
+    verify_manifest,
+)
 from vectorpin.signer import Signer
 from vectorpin.verifier import (
     KeyEntry,
@@ -45,15 +62,25 @@ __version__ = "0.2.0"
 __all__ = [
     "DOMAIN_TAG",
     "PROTOCOL_VERSION",
+    "CollectionManifest",
     "KeyEntry",
     "LegacyV1Verifier",
+    "ManifestError",
+    "ManifestResult",
     "Pin",
     "PinHeader",
     "Signer",
     "VerificationResult",
     "Verifier",
     "VerifyError",
+    "build_manifest",
     "canonical_vector_bytes",
+    "hash_files",
     "hash_text",
     "hash_vector",
+    "merkle_root",
+    "native_dtype",
+    "sign_audit_summary",
+    "verify_audit_summary",
+    "verify_manifest",
 ]

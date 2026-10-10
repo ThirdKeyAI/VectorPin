@@ -10,7 +10,9 @@ VectorPin pins each embedding to its source content and the producing model via 
 
 This crate is **byte-for-byte compatible** with the Python reference (`pip install vectorpin`) and the TypeScript reference (`npm install vectorpin`). A pin produced by any of the three implementations verifies on the other two; the contract is enforced by shared test vectors that every port consumes in CI.
 
-Part of the [ThirdKey](https://thirdkey.ai) Trust Stack, alongside [Symbiont](https://github.com/ThirdKeyAI/Symbiont) — the Rust-native policy-governed agent runtime that consumes these attestations in-process without a Python sidecar.
+Part of the [ThirdKey](https://thirdkey.ai) Trust Stack, alongside [Symbiont](https://github.com/ThirdKeyAI/Symbiont) — the Rust-native policy-governed agent runtime. Symbiont's enterprise console backend consumes these attestations in-process (an optional dependency on this crate); the open-source runtime does not yet integrate VectorPin.
+
+Vectors are verified in their native precision: an `f64` slice against an `f32` pin is refused (`VerifyError::PrecisionWidening`) rather than narrowed, so pin under the dtype your store persists (`Signer::pin` defaults to the input slice's dtype).
 
 ## Quick start
 

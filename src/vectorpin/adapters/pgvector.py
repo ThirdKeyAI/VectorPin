@@ -39,7 +39,13 @@ from urllib.parse import urlparse
 
 import numpy as np
 
-from vectorpin.adapters.base import PIN_METADATA_KEY, BaseAdapter, PinnedRecord
+from vectorpin.adapters.base import (
+    PIN_METADATA_KEY,
+    BaseAdapter,
+    PinnedRecord,
+    parse_pin_field,
+    vector_from_store,
+)
 from vectorpin.attestation import Pin
 
 if TYPE_CHECKING:
@@ -237,25 +243,25 @@ class PgVectorAdapter(BaseAdapter):
             raise ValueError(
                 f"record {rid!r} has no vector in column {self._vec!r}"
             )
-        vector = np.asarray(embedding, dtype=np.float32)
-        if vector.ndim != 1:
-            raise ValueError(
-                f"vector for {rid!r} returned non-1D shape {vector.shape}"
-            )
-        pin: Pin | None = None
-        if pin_payload is not None:
-            # JSONB columns come back as already-decoded Python objects
-            # (dict). TEXT columns come back as str. Handle both.
-            if isinstance(pin_payload, str):
-                pin = Pin.from_json(pin_payload)
-            elif isinstance(pin_payload, dict):
-                pin = Pin.from_dict(pin_payload)
-            else:
-                # Unknown shape — surface as JSON for the strict parser.
-                pin = Pin.from_json(json.dumps(pin_payload))
+        # `register_vector` hands back a typed ndarray: float32 for a
+        # `vector` column, float16 for `halfvec`. That dtype is the
+        # persisted precision and is kept verbatim. A `vector` column
+        # that arrives as a plain sequence (no type adapter) is float4
+        # on disk, so float32 is its native width.
+        vector = vector_from_store(embedding, native_dtype=np.float32)
+        # JSONB columns come back as already-decoded Python objects
+        # (dict). TEXT columns come back as str. Anything else is
+        # re-serialized so the strict parser can reject it.
+        if pin_payload is not None and not isinstance(pin_payload, (str, dict)):
+            try:
+                pin_payload = json.dumps(pin_payload)
+            except (TypeError, ValueError):
+                pin_payload = ""
+        pin, parse_error = parse_pin_field(pin_payload)
         return PinnedRecord(
             id=str(rid),
             vector=vector,
             pin=pin,
             metadata={},
+            parse_error=parse_error,
         )
